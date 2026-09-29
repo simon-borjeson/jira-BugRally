@@ -1,0 +1,614 @@
+import express from 'express';
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadEnv } from './lib/env.js';
+import { createJiraBackend, tokenConnection } from './lib/jira.js';
+import { createDemoBackend } from './lib/demo.js';
+import { createOAuth, OAUTH_SCOPES, SOFTWARE_SCOPES } from './lib/oauth.js';
+import { ALL_TEAM, createSettings, normalizeTeam } from './lib/settings.js';
+import { ISSUE_KEY_RE, KINDS, PROJECT_KEY_RE } from './lib/board.js';
+
+const root = path.dirname(fileURLToPath(import.meta.url));
+loadEnv(path.join(root, '.env'));
+
+const PORT = Number(process.env.PORT) || 3000;
+// Only reachable from this computer by default, since the settings page can store Jira credentials.
+const HOST = process.env.HOST || '127.0.0.1';
+// The address people open in the browser. Must match the callback URL registered for "Sign in with Atlassian".
+const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
+const CALLBACK_URL = `${PUBLIC_URL}/auth/callback`;
+const DEFAULT_TEMPLATE = 'com.pyxis.greenhopper.jira:gh-simplified-kanban-classic';
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 50;
+
+const settings = createSettings(path.join(root, 'data', 'settings.json'));
+const oauth = createOAuth({
+  file: path.join(root, 'data', 'sessions.json'),
+  getConfig: () => currentJiraConfig().cfg || {},
+});
+let demo = null;
+let sharedBackend; // demo or API-token backend; null when each user signs in with OAuth
+let source; // 'settings' | 'env' | 'none'
+let method; // 'demo' | 'token' | 'oauth'
+const sessionBackends = new Map();
+
+function envJira() {
+  const { JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT_TEMPLATE } = process.env;
+  if (!(JIRA_BASE_URL && JIRA_EMAIL && JIRA_API_TOKEN)) return null;
+  return { method: 'token', baseUrl: JIRA_BASE_URL, email: JIRA_EMAIL, token: JIRA_API_TOKEN, projectTemplate: JIRA_PROJECT_TEMPLATE };
+}
+
+function currentJiraConfig() {
+  if (settings.hasJiraEntry()) {
+    const cfg = settings.getJira();
+    return { cfg: cfg ? { method: 'token', ...cfg } : null, source: cfg ? 'settings' : 'none' };
+  }
+  const env = envJira();
+  return { cfg: env, source: env ? 'env' : 'none' };
+}
+
+function makeTokenBackend(cfg) {
+  return createJiraBackend({ ...tokenConnection(cfg), projectTemplate: cfg.projectTemplate || DEFAULT_TEMPLATE });
+}
+
+function applyConfig() {
+  const { cfg, source: src } = currentJiraConfig();
+  source = src;
+  sessionBackends.clear();
+  if (!cfg) {
+    method = 'demo';
+    demo ||= createDemoBackend(path.join(root, 'data', 'demo-data.json'), path.join(root, 'data', 'demo-attachments'));
+    sharedBackend = demo;
+  } else if (cfg.method === 'oauth') {
+    method = 'oauth';
+    sharedBackend = null;
+  } else {
+    method = 'token';
+    sharedBackend = makeTokenBackend(cfg);
+  }
+}
+applyConfig();
+
+/* ---------- Helpers ---------- */
+const bad = (msg, status = 400) => Object.assign(new Error(msg), { status });
+const issueKey = (k) => {
+  const key = String(k || '').toUpperCase();
+  if (!ISSUE_KEY_RE.test(key)) throw bad('Invalid issue key.');
+  return key;
+};
+const projectKey = (k) => {
+  const key = String(k || '').toUpperCase();
+  if (!PROJECT_KEY_RE.test(key)) throw bad('Invalid project key.');
+  return key;
+};
+
+function cookies(req) {
+  return Object.fromEntries(
+    (req.headers.cookie || '')
+      .split(';')
+      .map((c) => c.trim().split('='))
+      .filter(([k]) => k)
+      .map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]),
+  );
+}
+function setCookie(res, name, value, { maxAge, path: p = '/' } = {}) {
+  const secure = PUBLIC_URL.startsWith('https://') ? '; Secure' : '';
+  res.append(
+    'Set-Cookie',
+    `${name}=${encodeURIComponent(value)}; Path=${p}; HttpOnly; SameSite=Lax${secure}${maxAge !== undefined ? `; Max-Age=${maxAge}` : ''}`,
+  );
+}
+
+// The backend for this request: shared (demo / API token) or this browser's own Atlassian sign-in.
+function be(req) {
+  if (sharedBackend) return sharedBackend;
+  const sid = cookies(req).bq_sid;
+  if (!oauth.getSession(sid)) throw Object.assign(new Error('Please sign in with Atlassian.'), { status: 401, needsLogin: true });
+  if (!sessionBackends.has(sid)) {
+    const cfg = currentJiraConfig().cfg;
+    sessionBackends.set(sid, createJiraBackend({ ...oauth.connectionFor(sid), projectTemplate: cfg.projectTemplate || DEFAULT_TEMPLATE }));
+  }
+  return sessionBackends.get(sid);
+}
+
+const app = express();
+app.disable('x-powered-by');
+app.use(express.json({ limit: '2mb' }));
+app.use(express.static(path.join(root, 'public')));
+
+const wrap = (fn) => (req, res, next) =>
+  Promise.resolve()
+    .then(() => fn(req, res))
+    .then((data) => {
+      if (!res.headersSent) res.json(data);
+    }, next);
+
+/* ---------- Sign in with Atlassian ---------- */
+app.get('/auth/login', (req, res) => {
+  if (method !== 'oauth') return res.redirect('/#/settings');
+  // The state cookie must be set on the same host the callback comes back to.
+  if (`${req.protocol}://${req.get('host')}` !== PUBLIC_URL) return res.redirect(`${PUBLIC_URL}/auth/login`);
+  const state = crypto.randomBytes(16).toString('hex');
+  setCookie(res, 'bq_state', state, { maxAge: 600, path: '/auth' });
+  res.redirect(oauth.authorizeUrl({ redirectUri: CALLBACK_URL, state }));
+});
+
+app.get('/auth/callback', async (req, res) => {
+  const fail = (msg) => res.redirect(`/#/signin?error=${encodeURIComponent(msg)}`);
+  if (req.query.error) return fail(req.query.error_description || String(req.query.error));
+  const state = cookies(req).bq_state;
+  setCookie(res, 'bq_state', '', { maxAge: 0, path: '/auth' });
+  if (!state || state !== req.query.state) return fail('The sign-in took too long or was started in another tab. Please try again.');
+  try {
+    const sid = await oauth.finishLogin({ code: String(req.query.code || ''), redirectUri: CALLBACK_URL });
+    setCookie(res, 'bq_sid', sid, { maxAge: 90 * 24 * 3600 });
+    res.redirect('/#/');
+  } catch (e) {
+    fail(e.message);
+  }
+});
+
+app.post('/auth/logout', (req, res) => {
+  const sid = cookies(req).bq_sid;
+  if (sid) {
+    oauth.destroy(sid);
+    sessionBackends.delete(sid);
+  }
+  setCookie(res, 'bq_sid', '', { maxAge: 0 });
+  res.json({ ok: true });
+});
+
+/* ---------- Connection settings (only from this computer) ---------- */
+const localOnly = (req, res, next) => {
+  const ip = req.socket.remoteAddress || '';
+  if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
+  res.status(403).json({ error: 'Settings can only be changed from the computer running Bug Rally.' });
+};
+
+const hint = (secret) => (secret ? `••••${secret.slice(-4)}` : '');
+
+function publicSettings() {
+  const { cfg } = currentJiraConfig();
+  return {
+    mode: method === 'demo' ? 'demo' : 'jira',
+    method,
+    source,
+    envAvailable: Boolean(envJira()),
+    callbackUrl: CALLBACK_URL,
+    signedInCount: method === 'oauth' ? oauth.count() : 0,
+    scopes: OAUTH_SCOPES,
+    softwareScopeList: SOFTWARE_SCOPES,
+    jira: cfg
+      ? {
+          method: cfg.method,
+          baseUrl: new URL(cfg.method === 'oauth' ? cfg.siteUrl : cfg.baseUrl).origin,
+          email: cfg.email || '',
+          tokenHint: hint(cfg.token),
+          clientId: cfg.clientId || '',
+          secretHint: hint(cfg.clientSecret),
+          softwareScopes: cfg.softwareScopes === true,
+          projectTemplate: cfg.projectTemplate || DEFAULT_TEMPLATE,
+        }
+      : null,
+  };
+}
+
+function siteOrigin(value) {
+  let v = String(value || '').trim();
+  if (v && !/^https?:\/\//i.test(v)) v = `https://${v}`;
+  try {
+    return new URL(v).origin;
+  } catch {
+    throw bad('Enter your Jira address, like https://your-company.atlassian.net');
+  }
+}
+
+function readJiraForm(body) {
+  const current = currentJiraConfig().cfg || {};
+  const same = (m) => current.method === m;
+  const projectTemplate = String(body?.projectTemplate || '').trim() || DEFAULT_TEMPLATE;
+  if (body?.method === 'oauth') {
+    const clientId = String(body.clientId || '').trim();
+    if (!clientId) throw bad('Enter the Client ID of your Atlassian app.');
+    // Leaving the secret blank keeps the one already saved.
+    const clientSecret = String(body.clientSecret || '').trim() || (same('oauth') ? current.clientSecret : '');
+    if (!clientSecret) throw bad('Enter the Client secret of your Atlassian app.');
+    return {
+      method: 'oauth',
+      siteUrl: siteOrigin(body.baseUrl),
+      clientId,
+      clientSecret,
+      projectTemplate,
+      // Jira Software permissions (boards, ranking). Off unless ticked; must match the app in the developer console.
+      softwareScopes: body.softwareScopes === true || body.softwareScopes === 'on',
+    };
+  }
+  const email = String(body?.email || '').trim();
+  if (!email) throw bad('Enter the email you log in to Jira with.');
+  const token = String(body?.token || '').trim() || (same('token') ? current.token : '');
+  if (!token) throw bad('Enter an API token.');
+  return { method: 'token', baseUrl: siteOrigin(body?.baseUrl), email, token, projectTemplate };
+}
+
+app.get('/api/settings', localOnly, wrap(() => publicSettings()));
+
+app.post(
+  '/api/settings/test',
+  localOnly,
+  wrap(async (req) => {
+    const cfg = readJiraForm(req.body);
+    if (cfg.method === 'oauth') return { ok: true, note: 'Saved app details are checked when you sign in.' };
+    return { ok: true, ...(await makeTokenBackend(cfg).status()) };
+  }),
+);
+
+app.post(
+  '/api/settings',
+  localOnly,
+  wrap(async (req) => {
+    const cfg = readJiraForm(req.body);
+    let user = null;
+    if (cfg.method === 'token') user = (await makeTokenBackend(cfg).status()).user; // only save a login that works
+    const before = currentJiraConfig().cfg;
+    settings.setJira(cfg);
+    // New app, site or permissions: old sign-ins don't match any more, so everyone signs in again.
+    if (
+      cfg.method !== 'oauth' ||
+      before?.clientId !== cfg.clientId ||
+      before?.siteUrl !== cfg.siteUrl ||
+      (before?.softwareScopes === true) !== cfg.softwareScopes
+    )
+      oauth.destroyAll();
+    applyConfig();
+    return { ...publicSettings(), user };
+  }),
+);
+
+app.post(
+  '/api/settings/demo',
+  localOnly,
+  wrap(() => {
+    settings.setJira(null);
+    oauth.destroyAll();
+    applyConfig();
+    return publicSettings();
+  }),
+);
+
+app.delete(
+  '/api/settings',
+  localOnly,
+  wrap(() => {
+    settings.clearJiraEntry();
+    oauth.destroyAll();
+    applyConfig();
+    return publicSettings();
+  }),
+);
+
+/* ---------- Game data ---------- */
+app.get(
+  '/api/status',
+  wrap(async (req) => {
+    if (method === 'oauth') {
+      const sid = cookies(req).bq_sid;
+      const s = oauth.getSession(sid);
+      const site = currentJiraConfig().cfg.siteUrl;
+      if (!s) return { mode: 'jira', auth: 'oauth', signedIn: false, site, source };
+      return { ...(await be(req).status()), auth: 'oauth', signedIn: true, source };
+    }
+    return { ...(await be(req).status()), signedIn: true, source };
+  }),
+);
+
+app.get(
+  '/api/projects',
+  wrap(async (req) => {
+    const projects = await be(req).listProjects();
+    return projects.map((p) => ({ ...p, teams: settings.teamCount(p.key) }));
+  }),
+);
+
+app.post(
+  '/api/projects',
+  wrap((req) => {
+    const name = String(req.body?.name || '').trim();
+    const key = String(req.body?.key || '').trim().toUpperCase();
+    if (!name) throw bad('Give the project a name.');
+    if (!PROJECT_KEY_RE.test(key)) throw bad('Key must be 2–10 characters: letters, digits or _, starting with a letter.');
+    return be(req).createProject({ key, name });
+  }),
+);
+
+/* ---------- Team pages (only in Bug Rally) ---------- */
+const teamOf = (pk, id) => {
+  const team = settings.getTeam(pk, String(id || ''));
+  if (!team) throw bad('That team page no longer exists.', 404);
+  return team;
+};
+// Team + project, from a request body/query that names them. Used to apply a team's defaults.
+const teamFrom = (src) => (src?.worldKey && src?.teamId ? { pk: projectKey(src.worldKey), team: teamOf(projectKey(src.worldKey), src.teamId) } : null);
+
+app.get(
+  '/api/projects/:key/teams',
+  wrap(async (req) => {
+    const key = projectKey(req.params.key);
+    const project = await be(req).projectInfo(key);
+    return { project, teams: settings.listTeams(key) };
+  }),
+);
+
+app.post(
+  '/api/projects/:key/teams',
+  wrap((req) => {
+    be(req); // must be signed in
+    const name = String(req.body?.name || '').trim();
+    if (!name) throw bad('Give the team page a name.');
+    return settings.createTeam(projectKey(req.params.key), name);
+  }),
+);
+
+app.get('/api/projects/:key/teams/:team', wrap((req) => teamOf(projectKey(req.params.key), req.params.team)));
+
+// Accepts any part of a team page: name, linked, hidden, filter, defaults.
+app.put(
+  '/api/projects/:key/teams/:team',
+  wrap((req) => {
+    be(req);
+    const key = projectKey(req.params.key);
+    const id = req.params.team;
+    if (id === ALL_TEAM) throw bad('The whole-project view has no settings. Create a team page instead.');
+    teamOf(key, id);
+    const body = req.body || {};
+    const patch = {};
+    if ('name' in body) {
+      if (!String(body.name || '').trim()) throw bad('Give the team page a name.');
+      patch.name = body.name;
+    }
+    if ('linked' in body) patch.linked = (body.linked || []).map(issueKey);
+    if ('hidden' in body) patch.hidden = (body.hidden || []).map(issueKey);
+    if ('filter' in body) {
+      const f = normalizeTeam({ filter: body.filter }).filter;
+      if (f.mode === 'jql' && !f.jql) throw bad('Write a JQL query, or pick “Whole project”.');
+      if (f.mode === 'saved' && !f.filterId) throw bad('Pick a saved filter, or pick “Whole project”.');
+      patch.filter = f;
+    }
+    if ('defaults' in body) {
+      const d = normalizeTeam({ defaults: body.defaults }).defaults;
+      const badLabel = d.labels.find((l) => /\s/.test(l));
+      if (badLabel) throw bad(`Jira labels can't contain spaces: “${badLabel}”. Use a dash instead.`);
+      patch.defaults = d;
+    }
+    return settings.updateTeam(key, id, patch);
+  }),
+);
+
+app.delete(
+  '/api/projects/:key/teams/:team',
+  wrap((req) => {
+    be(req);
+    if (!settings.deleteTeam(projectKey(req.params.key), req.params.team)) throw bad('That team page no longer exists.', 404);
+    return { ok: true };
+  }),
+);
+
+app.get(
+  '/api/projects/:key/teams/:team/board',
+  wrap(async (req) => {
+    const key = projectKey(req.params.key);
+    const team = teamOf(key, req.params.team);
+    const backend = be(req);
+    const [board, bugTypeName] = await Promise.all([backend.board(key, team), backend.bugTypeName(key, team.defaults.bugType)]);
+    return { ...board, team, bugTypeName };
+  }),
+);
+
+app.get(
+  '/api/projects/:key/teams/:team/kanban',
+  wrap((req) => {
+    const key = projectKey(req.params.key);
+    const team = teamOf(key, req.params.team);
+    return be(req).kanban(key, team, settings.getKanbanLayout(key, team.id));
+  }),
+);
+
+// How the Kanban groups statuses into columns: { mode: 'board', boardId, boardName } | { mode: 'category' } | { mode: 'status' }
+app.put(
+  '/api/projects/:key/teams/:team/kanban-layout',
+  wrap((req) => {
+    be(req);
+    const key = projectKey(req.params.key);
+    const team = teamOf(key, req.params.team);
+    const saved = settings.setKanbanLayout(key, team.id, req.body || {});
+    if (!saved) throw bad('That team page no longer exists.', 404);
+    return saved;
+  }),
+);
+
+app.get('/api/projects/:key/boards', wrap((req) => be(req).listBoards(projectKey(req.params.key))));
+
+app.post(
+  '/api/projects/:key/teams/:team/test-filter',
+  wrap((req) => {
+    const f = normalizeTeam({ filter: req.body?.filter }).filter;
+    if (f.mode === 'jql' && !f.jql) throw bad('Write a JQL query first.');
+    if (f.mode === 'saved' && !f.filterId) throw bad('Pick a saved filter first.');
+    return be(req).testFilter(projectKey(req.params.key), f);
+  }),
+);
+
+app.get('/api/projects/:key/options', wrap((req) => be(req).worldOptions(projectKey(req.params.key))));
+
+app.get('/api/filters', wrap((req) => be(req).searchFilters(String(req.query.q || '').slice(0, 100))));
+
+app.get(
+  '/api/search',
+  wrap((req) => {
+    const kind = req.query.kind === 'feature' ? 'feature' : 'issue';
+    const pk = req.query.project ? projectKey(req.query.project) : null;
+    return be(req).searchIssues({
+      q: String(req.query.q || '').slice(0, 100),
+      kind,
+      projectKey: pk,
+      onlyProject: req.query.only === '1',
+    });
+  }),
+);
+
+app.get(
+  '/api/issues/:key',
+  wrap((req) => {
+    const t = teamFrom({ worldKey: req.query.world, teamId: req.query.team });
+    return be(req).getIssue(issueKey(req.params.key), { workGroup: t?.team.defaults.workGroup || null });
+  }),
+);
+
+app.post(
+  '/api/issues',
+  wrap((req) => {
+    const { kind, parentKey } = req.body || {};
+    const summary = String(req.body?.summary || '').trim();
+    const pk = projectKey(req.body?.projectKey);
+    const t = teamFrom(req.body);
+    if (!KINDS.includes(kind)) throw bad(`Kind must be one of ${KINDS.join(', ')}.`);
+    if (!summary) throw bad('Give it a summary.');
+    return be(req).createIssue({
+      projectKey: pk,
+      kind,
+      summary,
+      parentKey: parentKey ? issueKey(parentKey) : null,
+      defaults: t?.team.defaults || null,
+      homeProject: t?.pk || pk,
+    });
+  }),
+);
+
+app.post('/api/issues/:key/status', wrap((req) => be(req).setDone(issueKey(req.params.key), Boolean(req.body?.done))));
+
+app.put(
+  '/api/issues/:key/parent',
+  wrap(async (req) => {
+    const key = issueKey(req.params.key);
+    const parent = req.body?.parentKey ? issueKey(req.body.parentKey) : null;
+    if (parent === key) throw bad('An issue cannot be its own feature.');
+    const t = teamFrom(req.body);
+    const backend = be(req);
+    const result = await backend.setParent(key, parent);
+    if (parent && t?.team.defaults.applyOnLink) {
+      try {
+        Object.assign(result, await backend.applyDefaults(key, t.team.defaults, t.pk));
+      } catch (e) {
+        result.warning = `Linked, but the team defaults couldn't be added: ${e.message}`;
+      }
+    }
+    return result;
+  }),
+);
+
+// Kanban drag and drop: optionally change status (or finish), then rank before/after another issue.
+app.post(
+  '/api/issues/:key/move',
+  wrap((req) => {
+    const key = issueKey(req.params.key);
+    const body = req.body || {};
+    const before = body.before ? issueKey(body.before) : null;
+    const after = body.after ? issueKey(body.after) : null;
+    if (before === key || after === key) throw bad('An issue cannot be ranked next to itself.');
+    const statusIds = (Array.isArray(body.statusIds) ? body.statusIds : body.statusId ? [body.statusId] : [])
+      .map((x) => String(x).slice(0, 40))
+      .slice(0, 50);
+    if (!statusIds.length && !body.done && !before && !after) throw bad('Nothing to change.');
+    return be(req).moveIssue(key, { statusIds, done: Boolean(body.done), before, after });
+  }),
+);
+
+/* ---------- Description & comments ---------- */
+const MAX_TEXT = 32000;
+const readText = (body) => {
+  const text = String(body?.text ?? '');
+  if (text.length > MAX_TEXT) throw bad(`That's too long (max ${MAX_TEXT} characters).`);
+  return text;
+};
+
+app.get('/api/issues/:key/description', wrap((req) => be(req).getDescriptionSource(issueKey(req.params.key))));
+app.put('/api/issues/:key/description', wrap((req) => be(req).setDescription(issueKey(req.params.key), readText(req.body))));
+app.post(
+  '/api/issues/:key/comments',
+  wrap((req) => {
+    const text = readText(req.body).trim();
+    if (!text) throw bad('Write something first.');
+    return be(req).addComment(issueKey(req.params.key), text);
+  }),
+);
+
+/* ---------- Attachments ---------- */
+app.post(
+  '/api/issues/:key/attachments',
+  express.raw({ type: () => true, limit: `${MAX_UPLOAD_MB}mb` }),
+  wrap((req) => {
+    const filename = decodeURIComponent(String(req.get('x-file-name') || ''))
+      .replace(/[\\/\0\r\n]/g, '_')
+      .slice(0, 200);
+    if (!filename) throw bad('Missing file name.');
+    if (!req.body?.length) throw bad('The file is empty.');
+    return be(req).uploadAttachment(issueKey(req.params.key), {
+      filename,
+      mimeType: String(req.get('content-type') || 'application/octet-stream').split(';')[0],
+      buffer: req.body,
+    });
+  }),
+);
+
+const INLINE_OK = /^image\/(png|jpe?g|gif|webp|bmp|avif)$/i;
+
+app.get(
+  '/api/attachments/:id/:kind(content|thumbnail)',
+  wrap(async (req, res) => {
+    const id = String(req.params.id);
+    if (!/^\d{1,20}$/.test(id)) throw bad('Invalid attachment id.');
+    const file = await be(req).attachment(id, { thumbnail: req.params.kind === 'thumbnail' });
+    const type = (file.mimeType || 'application/octet-stream').split(';')[0];
+    const inline = INLINE_OK.test(type) && req.query.download !== '1';
+    res.setHeader('Content-Type', inline ? type : 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // Attachments are other people's files: never let them run as part of this site.
+    res.setHeader('Content-Security-Policy', "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox");
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.setHeader(
+      'Content-Disposition',
+      `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.filename || `attachment-${id}`)}`,
+    );
+    if (file.buffer) return res.end(file.buffer);
+    const len = file.res.headers.get('content-length');
+    if (len) res.setHeader('Content-Length', len);
+    const reader = file.res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!res.write(value)) await new Promise((r) => res.once('drain', r));
+    }
+    res.end();
+  }),
+);
+
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  const status = err.type === 'entity.too.large' ? 413 : err.status && err.status < 600 ? err.status : 500;
+  if (status >= 500) console.error(err);
+  if (res.headersSent) return res.end();
+  res.status(status).json({
+    error: status === 413 ? `That file is too big (max ${MAX_UPLOAD_MB} MB).` : err.message || 'Something went wrong',
+    needsLogin: Boolean(err.needsLogin),
+  });
+});
+
+app.listen(PORT, HOST, () => {
+  const where = {
+    demo: 'DEMO data. Connect Jira on the Settings page',
+    token: `Jira with an API token (${source === 'env' ? 'from .env' : 'from Settings page'})`,
+    oauth: 'Jira, everyone signs in with their own Atlassian account',
+  }[method];
+  console.log(`Bug Rally running on ${PUBLIC_URL}  ·  ${where}`);
+});

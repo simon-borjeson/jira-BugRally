@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bug Rally</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a href="#/" class="logo" aria-label="Bug Rally home">
+        <span class="logo-bug" id="logo-bug"></span>
+        <span class="pixel">BUG RALLY</span>
+      </a>
+      <nav id="crumbs" class="crumbs" aria-label="Breadcrumb"></nav>
+      <div class="top-right">
+        <a id="mode-badge" class="badge" href="#/settings">…</a>
+        <button id="sound-btn" class="icon-btn" type="button" aria-pressed="false" title="Sound effects">🔇</button>
+        <a class="icon-btn" href="#/settings" title="Settings" aria-label="Settings">⚙</a>
+        <span id="user-chip" class="user-chip" title="You're signed in with your own Atlassian account" hidden></span>
+        <button id="signout-btn" class="btn small" type="button" hidden>Sign out</button>
+      </div>
+    </header>
+
+    <main id="app" class="app"></main>
+
+    <dialog id="modal" class="modal">
+      <form id="modal-form" method="dialog"></form>
+    </dialog>
+    <aside id="drawer" class="drawer" aria-hidden="true" aria-label="Issue details"></aside>
+    <div id="lightbox" class="lightbox" role="dialog" aria-label="Image preview" hidden></div>
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
