@@ -1544,6 +1544,52 @@ code {
 .subtasks .q-sum {
   flex: 1;
 }
+.rel-list li {
+  padding: 0;
+}
+.rel-open {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  padding: 6px 4px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.rel-open:hover,
+.rel-open:focus-visible {
+  background: var(--panel-2);
+}
+.rel-open .q-sum {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.rel-open .q-status {
+  white-space: nowrap;
+}
+.rel-open .q-key {
+  color: var(--cyan);
+  white-space: nowrap;
+}
+.rel-open .q-icon svg {
+  height: 12px;
+  width: auto;
+}
+.rel-list li.done .q-sum {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.rel-type {
+  margin: 10px 0 2px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--gold);
+}
 
 /* ---------- Search dialog ---------- */
 .modal .search-input {
@@ -2252,6 +2298,20 @@ code {
 }
 
 /* ---------- Kanban ---------- */
+/* The board uses the full window width so all columns fit side by side. */
+.app:has(> .screen.kanban) {
+  max-width: none;
+  padding-bottom: 8px;
+}
+/* Rail and columns fill the window below the header (height set by fitKanban). */
+@media (min-width: 721px) {
+  .kanban-wrap .kcol {
+    max-height: var(--kb-h, calc(100vh - 260px));
+  }
+  .kanban-wrap .kfeatures {
+    max-height: var(--kb-h, calc(100vh - 90px));
+  }
+}
 .kanban-help {
   margin: 0 3px 14px;
 }
@@ -2263,7 +2323,8 @@ code {
   padding: 3px 3px 16px;
 }
 .kcol {
-  flex: 0 0 280px;
+  flex: 1 1 240px;
+  min-width: 220px;
   background: var(--panel);
   border-top: 5px solid var(--slate);
   display: flex;
@@ -2274,7 +2335,8 @@ code {
   border-top-color: var(--gold);
 }
 .kcol.done-col {
-  flex-basis: 170px;
+  flex: 0 0 170px;
+  min-width: 0;
   border-top-color: var(--green);
 }
 .kcol > header {
@@ -2544,7 +2606,7 @@ code {
   border-left: 3px dashed var(--line);
 }
 .kfeatures {
-  flex: 0 0 250px;
+  flex: 0 0 240px;
   position: sticky;
   top: 70px;
   margin: 3px 0;
@@ -2668,6 +2730,16 @@ code {
 .kf-open:hover {
   opacity: 1;
 }
+.kf-id {
+  color: var(--cyan);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.kf-id:hover {
+  color: var(--text);
+  text-decoration-style: solid;
+}
 .kfeat.none .kf-name {
   color: var(--muted);
 }
@@ -2684,6 +2756,77 @@ code {
 }
 .kc-status.done {
   background: var(--lime);
+}
+
+/* Features rail: ranking and dropping cards */
+.kfeat[draggable='true'] {
+  cursor: grab;
+}
+.kfeat.dragging {
+  opacity: 0.35;
+}
+.kfeat.saving {
+  opacity: 0.6;
+}
+.kfeat.moved {
+  border-color: var(--green);
+}
+.kfeat.drop-target {
+  border-color: var(--cyan);
+  border-style: dashed;
+  box-shadow: 0 0 12px rgba(115, 239, 247, 0.35);
+}
+.kf-placeholder {
+  border: 2px dashed var(--gold);
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+/* Due soon / overdue warnings */
+.due-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font: 700 11px/1.5 var(--sans);
+  white-space: nowrap;
+  background: rgba(255, 205, 117, 0.16);
+  color: var(--gold);
+  border: 1px solid rgba(255, 205, 117, 0.5);
+}
+.due-badge.urgent {
+  background: rgba(239, 125, 87, 0.2);
+  color: #ffb08f;
+  border-color: rgba(239, 125, 87, 0.7);
+}
+.due-badge.overdue {
+  background: #b13e53;
+  color: #fff;
+  border-color: #b13e53;
+}
+.kf-due,
+.card-due {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.card-due {
+  margin: 8px 0 0;
+}
+.kanban-help .due-badge {
+  margin-right: 6px;
+}
+.ent-label.due.soon {
+  color: var(--gold);
+}
+.ent-label.due.urgent {
+  color: #ffb08f;
+}
+.ent-label.due.overdue {
+  background: #b13e53;
+  color: #fff;
 }
 
 /* Highlighting */

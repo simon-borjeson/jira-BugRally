@@ -305,7 +305,7 @@ app.get(
   '/api/projects',
   wrap(async (req) => {
     const projects = await be(req).listProjects();
-    return projects.map((p) => ({ ...p, teams: settings.teamCount(p.key) }));
+    return projects;
   }),
 );
 
@@ -320,7 +320,7 @@ app.post(
   }),
 );
 
-/* ---------- Team pages (only in Bug Rally) ---------- */
+/* ---------- Team pages: one per Jira board ---------- */
 const teamOf = (pk, id) => {
   const team = settings.getTeam(pk, String(id || ''));
   if (!team) throw bad('That team page no longer exists.', 404);
@@ -333,46 +333,35 @@ app.get(
   '/api/projects/:key/teams',
   wrap(async (req) => {
     const key = projectKey(req.params.key);
-    const project = await be(req).projectInfo(key);
-    return { project, teams: settings.listTeams(key) };
-  }),
-);
-
-app.post(
-  '/api/projects/:key/teams',
-  wrap((req) => {
-    be(req); // must be signed in
-    const name = String(req.body?.name || '').trim();
-    if (!name) throw bad('Give the team page a name.');
-    return settings.createTeam(projectKey(req.params.key), name);
+    const backend = be(req);
+    const [project, boards] = await Promise.all([
+      backend.projectInfo(key),
+      backend.listBoards(key).then(
+        (list) => ({ list }),
+        (e) => ({ error: e.message }),
+      ),
+    ]);
+    return { project, teams: boards.list ? settings.boardTeams(key, boards.list) : [], boardsError: boards.error || null };
   }),
 );
 
 app.get('/api/projects/:key/teams/:team', wrap((req) => teamOf(projectKey(req.params.key), req.params.team)));
 
-// Accepts any part of a team page: name, linked, hidden, filter, defaults.
+// Accepts the parts of a team page Bug Rally keeps: linked, hidden, filter.applyToItems, defaults.
+// The name, filter and columns come from the Jira board.
 app.put(
   '/api/projects/:key/teams/:team',
   wrap((req) => {
     be(req);
     const key = projectKey(req.params.key);
     const id = req.params.team;
-    if (id === ALL_TEAM) throw bad('The whole-project view has no settings. Create a team page instead.');
+    if (id === ALL_TEAM) throw bad('The whole-project view has no settings. Open one of the boards instead.');
     teamOf(key, id);
     const body = req.body || {};
     const patch = {};
-    if ('name' in body) {
-      if (!String(body.name || '').trim()) throw bad('Give the team page a name.');
-      patch.name = body.name;
-    }
     if ('linked' in body) patch.linked = (body.linked || []).map(issueKey);
     if ('hidden' in body) patch.hidden = (body.hidden || []).map(issueKey);
-    if ('filter' in body) {
-      const f = normalizeTeam({ filter: body.filter }).filter;
-      if (f.mode === 'jql' && !f.jql) throw bad('Write a JQL query, or pick “Whole project”.');
-      if (f.mode === 'saved' && !f.filterId) throw bad('Pick a saved filter, or pick “Whole project”.');
-      patch.filter = f;
-    }
+    if ('filter' in body) patch.filter = { applyToItems: body.filter?.applyToItems !== false };
     if ('defaults' in body) {
       const d = normalizeTeam({ defaults: body.defaults }).defaults;
       const badLabel = d.labels.find((l) => /\s/.test(l));
@@ -383,14 +372,6 @@ app.put(
   }),
 );
 
-app.delete(
-  '/api/projects/:key/teams/:team',
-  wrap((req) => {
-    be(req);
-    if (!settings.deleteTeam(projectKey(req.params.key), req.params.team)) throw bad('That team page no longer exists.', 404);
-    return { ok: true };
-  }),
-);
 
 app.get(
   '/api/projects/:key/teams/:team/board',
@@ -419,6 +400,7 @@ app.put(
     be(req);
     const key = projectKey(req.params.key);
     const team = teamOf(key, req.params.team);
+    if (team.boardId) throw bad("A board's team page always uses that board's columns. Change them on the board in Jira.");
     const saved = settings.setKanbanLayout(key, team.id, req.body || {});
     if (!saved) throw bad('That team page no longer exists.', 404);
     return saved;

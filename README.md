@@ -3,15 +3,19 @@
 A Jira front-end that shows progress as a race. It is not a game you play: it is your Jira board, drawn as race tracks.
 
 - **Project = Circuit.** The start screen lists your Jira projects.
-- **Team page.** Inside a project you pick your team. Team pages exist only in Bug Rally: each one has its own Jira filter and fills in the team's work group, components and labels on everything the team creates. There is also a *Whole project* view with no filter.
-- **Feature (Epic) = Stage.** Each team page shows its stages with a progress bar. Unfinished stages come first; stages whose feature is marked done move to a **Finished stages** section, newest first, which you can collapse (Bug Rally remembers that per team page).
+- **Team = Jira board.** Inside a project you pick your team: every Jira board of the project is a team page. It shows the issues in the board's filter, and its Kanban uses the board's columns. Per team, Bug Rally fills in the team's work group, components and labels on everything the team creates. There is also a *Whole project* view with no filter.
+- **Feature (Epic) = Stage.** Each team page shows its stages with a progress bar. Unfinished stages come first, in Jira **Rank** order (top = highest); stages whose feature is marked done move to a **Finished stages** section, newest first, which you can collapse (Bug Rally remembers that per team page).
 - **On a stage** every issue under the epic sits on the track:
   - **Tasks** are red fuel cans, **stories** are blue ones. Mark one done and it becomes a green checkpoint flag.
   - **Bugs** (Bug, Defect or **Fault Report** issue types) are traffic cones blocking the road. Mark one done and it gets knocked over.
   - The car drives up to the next open item, so how far it has come is your progress.
   - When everything is done the finish line waves and the trophy lights up. Mark the feature done to take it.
 - **Not in any feature:** every team page has a *Free practice* stage with the tasks, stories and fault reports/bugs that don't belong to any feature (within the team's filter). Each row has a **Move to feature…** menu to sort them into a stage.
-- **Click any fuel can, cone or row** to open its details: description, status, priority, people, dates, labels, sub-tasks, attachments and comments, loaded live from Jira.
+- **Due dates:** anything unfinished with a Jira due date 7 days away or less gets a ⏰ warning: yellow for *Due in 3–7 days*, orange for *Due today / tomorrow / in 2 days*, red for *Overdue*. You see it on Kanban cards, stage rows, the details panel, and for features on their stage card and in the Kanban rail. Features and the Kanban also sum it up, for example *1 overdue, 2 due within a week*.
+- **Click any fuel can, cone or row** (or a feature's ID on the Kanban) to open its details: description, status, priority, people, dates, labels, attachments and comments, loaded live from Jira.
+  - **Child items:** a feature's tasks, stories and bugs, or a ticket's sub-tasks, in rank order with their status.
+  - **Related tickets:** the issue's Jira links, grouped by type (blocks, is blocked by, relates to…).
+  - Click a child or related ticket to open its details; **←** goes back.
 
 In the details you can:
 
@@ -25,15 +29,15 @@ You can also create projects, features (epics), tasks, stories and bugs, mark an
 
 Every team page has two views: **🏁 Stages** (the race track per feature) and **🚦 Kanban**.
 
-- Kanban shows all unfinished tasks, stories and fault reports/bugs in the team's filter, whether or not they are in a feature (plus issues in features linked to the team, minus hidden ones).
-- **Columns** (picker above the board, remembered per team page):
+- Kanban uses the full window width and shows all unfinished tasks, stories and fault reports/bugs in the team's filter, whether or not they are in a feature (minus those in hidden features). Issues in a linked feature that don't match the filter stay off the board, but they still count in that feature's progress.
+- **Columns:** a board's team page always uses that board's columns (change them on the board in Jira). The *Whole project* view has a picker instead (remembered per project):
   - *Like Jira board: …* uses the column setup of one of the project's Jira boards, so many statuses are grouped exactly as on that board (for example To Do / In Progress / Verification). Cards in a grouped column show their exact status.
   - Columns can also hold Done statuses (Done, Closed…): they show what was finished in the last 14 days, and dropping a card there finishes it. Without such a column there's a separate **Done** drop zone.
   - *My own columns…* (or **✎ Edit columns**): name your columns (for example To Do / In Progress / Verification) and choose which Jira status goes in which column, e.g. *In Progress 3* → Verification. Works without access to Jira boards.
   - *To Do / In Progress* groups statuses by Jira's status category (the default).
   - *One column per status*.
   - Done statuses never get a column; use the **Done** drop zone.
-- **Features rail** on the left: the team's unfinished features with their progress bar, done counts and how many of their cards are on the board. It isn't part of the board (you can't drop cards on it). Click a feature to highlight its cards and fade the rest; click it again or **Show all cards** to clear. *Not in any feature* highlights the loose tasks and bugs, and 🏁 opens the feature's stage.
+- **Features rail** on the left: the team's unfinished features in Rank order, with their progress bar, done counts and how many of their cards are on the board. **Drag a feature** up or down (or Alt+↑ / Alt+↓) to change its rank in Jira; the Stages view follows the same order. **Drop a card on a feature** to move the issue into it (sets its parent), or on *Not in any feature* to take it out. Click a feature's **ID** (for example ARTZEE-1234) to open its details (description, comments, attachments), just like a card; from the keyboard, Shift+Enter. Click a feature to highlight its cards and fade the rest; click it again or **Show all cards** to clear. *Not in any feature* highlights the loose tasks and bugs, and 🏁 opens the feature's stage.
 - Cards are sorted by Jira **Rank**, top = highest.
 - **Drag a card above another** to rank it there (Jira's rank "before" that issue). Drop it at the bottom of a column to rank it after the last card.
 - **Drag to another column** to change the status. For a column with several statuses, Bug Rally moves the issue to the first status in that column the workflow allows (like a Jira board does). If none is allowed, you get a message and the card snaps back.
@@ -44,22 +48,20 @@ Every team page has two views: **🏁 Stages** (the race track per feature) and 
 ### Connecting existing work
 
 - **Existing tasks and bugs → a stage:** in a stage, press **🔗 Link existing** and search Jira. Or open an issue and pick another feature under *Stage (feature)*. Both set the issue's parent in Jira.
-- **Existing features → a team page:** on a team page, press **🔗 Link existing feature**, or open **⚙ Team settings**. You can link epics from other projects and hide epics you don't want as stages. This is saved in Bug Rally only (`data/settings.json`) and doesn't change Jira.
+- **Existing features → a team page:** on a team page, press **🔗 Link existing feature**, or open **⚙ Team settings**. You can link epics from other projects and hide epics you don't want as stages. A linked feature always shows all of its issues and full progress, even ones outside the team's filter. This is saved in Bug Rally only (`data/settings.json`) and doesn't change Jira.
 
 ### Team pages
 
-Open a project, press **+ New team page**, give it a name, and set it up in **⚙ Team settings**:
+Every Jira board of the project is a team page, automatically. Open **⚙ Team settings** on one to set:
 
-- **Team name:** shown in Bug Rally only.
-- **Filter:** which Jira issues belong to the team. Choose the whole project, your own **JQL** (can span projects), or one of your **saved Jira filters**. Epics that match become stages. Tick *Also filter the tasks and bugs inside each feature* to apply the filter inside stages too. **Test filter** shows how many issues match.
+- **Also filter the tasks and bugs inside each feature:** on by default. Untick it to show every issue in the team's features, even ones not on the board.
 - **Issue type for bugs:** what **+ Bug** creates. *Automatic* uses **Fault Report** when the project has it, otherwise Bug. The button and lists use that name.
 - **Defaults for new issues:** labels, components and a work-group field (for example Jira's *Team* field or a custom *Work group* select field) set automatically on everything the team creates from its page. Optionally also added when you link existing issues into a feature.
   - A default is skipped (and you get a message) when that field isn't on the create screen for that issue type. Components are only set on issues in the team page's own project.
   - For a Team field, enter the team ID (the last part of the team's URL in Jira).
+- **Linked and hidden features** (see above).
 
-- **Delete team page** removes only the Bug Rally page; nothing in Jira is touched.
-
-The team's work group, components and labels are shown as chips on its page and in the create dialogs, so it's clear what will be filled in. Filters need a Jira connection; in demo mode every team page shows the whole project. Settings saved by an earlier version of Bug Rally are turned into a team page automatically.
+The team name, which issues belong to the team, and the Kanban columns come from the board; change those in Jira. Listing boards needs the Jira Software permissions (see below). Team settings are saved in `data/settings.json`. Team pages made by hand in earlier versions of Bug Rally are no longer shown. In demo mode there are two sample boards and every board shows the whole project.
 
 ## Run it
 

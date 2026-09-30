@@ -155,11 +155,57 @@ function closeDrawer() {
   $$('.ent.selected, .questlog li.selected').forEach((e) => e.classList.remove('selected'));
 }
 drawer.addEventListener('click', (e) => {
-  if (e.target.closest('[data-close]')) closeDrawer();
+  if (e.target.closest('[data-close]')) return closeDrawer();
+  // Child items and related tickets open their own details; ← goes back.
+  const go = e.target.closest('[data-drawer-open]');
+  if (go && dz?.d) {
+    const all = [...(dz.d.children || []), ...(dz.d.links || []).map((l) => l.issue)];
+    const next = all.find((x) => x.key === go.dataset.drawerOpen);
+    if (next) openDrawer(next, dz.ctx, [...dz.trail, dz.it]);
+    return;
+  }
+  if (e.target.closest('[data-drawer-back]') && dz?.trail.length) {
+    const trail = [...dz.trail];
+    openDrawer(trail.pop(), dz.ctx, trail);
+  }
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#modal').open && $('#lightbox').hidden) closeDrawer();
 });
+
+// Due dates: a warning when something unfinished is due within a week, or overdue.
+const DUE_WARN_DAYS = 7;
+function dueInfo(it) {
+  if (!it?.duedate || it.done) return null;
+  const [y, m, d] = String(it.duedate).slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((new Date(y, m - 1, d) - today) / 86400000);
+  if (days > DUE_WARN_DAYS) return null;
+  const text =
+    days < 0 ? `Overdue ${-days} day${days === -1 ? '' : 's'}` : days === 0 ? 'Due today' : days === 1 ? 'Due tomorrow' : `Due in ${days} days`;
+  return { days, text, level: days < 0 ? 'overdue' : days <= 2 ? 'urgent' : 'soon' };
+}
+const fmtDay = (s) => {
+  const [y, m, d] = String(s || '').slice(0, 10).split('-').map(Number);
+  return y ? new Date(y, m - 1, d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+};
+function dueBadge(it) {
+  const d = dueInfo(it);
+  return d ? `<span class="due-badge ${d.level}" title="Due ${esc(fmtDay(it.duedate))}">⏰ ${esc(d.text)}</span>` : '';
+}
+// "⏰ 3 due within a week" for a list of issues (overdue ones included).
+function dueSummary(items) {
+  const soon = items.map(dueInfo).filter(Boolean);
+  if (!soon.length) return '';
+  const overdue = soon.filter((d) => d.days < 0).length;
+  const level = overdue ? 'overdue' : soon.some((d) => d.level === 'urgent') ? 'urgent' : 'soon';
+  const text = overdue
+    ? `${overdue} overdue${soon.length > overdue ? `, ${soon.length - overdue} due within a week` : ''}`
+    : `${soon.length} due within a week`;
+  return `<span class="due-badge ${level}">⏰ ${text}</span>`;
+}
 
 const fmtDate = (s, withTime = false) => {
   if (!s) return '';
@@ -530,7 +576,7 @@ async function renderProjects() {
         <a class="card world-card" href="#/p/${encodeURIComponent(p.key)}">
           <span class="pixel tag">CIRCUIT ${projects.indexOf(p) + 1}</span>
           <h2>${esc(p.name)}</h2>
-          <span class="key">${esc(p.key)} · ${p.teams ? `${p.teams} team page${p.teams > 1 ? 's' : ''}` : 'no team pages yet'}</span>
+          <span class="key">${esc(p.key)}</span>
           <span class="world-deco" aria-hidden="true">${SPRITES.bush}</span>
         </a>`,
         )
@@ -580,18 +626,20 @@ function createProjectForm() {
 }
 
 /* =========================================================
-   Screen 1b: team pages of a project (only in Bug Rally)
+   Screen 1b: team pages of a project (one per Jira board)
    ========================================================= */
 async function renderProject(pkey) {
   if (!state.teams[pkey]) loadingScreen('LOADING CIRCUIT');
-  const { project, teams } = await loadTeams(pkey);
+  const { project, teams, boardsError } = await loadTeams(pkey);
   setCrumbs([{ label: 'Circuits', href: '#/' }, { label: project.name }]);
+  const filterKey = `bq.boardFilter.${pkey}`;
+  const boardFilter = store.get(filterKey, '');
 
   const teamCard = (t) => `
-    <a class="card team-card" href="${teamHref(pkey, t.id)}">
-      <span class="pixel tag">TEAM</span>
+    <a class="card team-card" href="${teamHref(pkey, t.id)}" data-search="${esc(`${t.name} ${t.boardType || ''} ${t.boardId || ''}`.toLowerCase())}">
+      <span class="pixel tag">${t.boardType ? `${esc(t.boardType.toUpperCase())} ` : ''}BOARD</span>
       <h2>${esc(t.name)}</h2>
-      <span class="key filter-line" title="${esc(filterSummary(t, pkey))}">⛃ ${esc(filterSummary(t, pkey))}</span>
+      <span class="key filter-line">⛃ Board filter and columns from Jira</span>
       ${teamDefaultsChips(t) || '<span class="muted small-text">Nothing filled in automatically</span>'}
       <div class="team-stats muted small-text" data-team="${esc(t.id)}">Loading stages…</div>
       <span class="team-car" aria-hidden="true">${SPRITES.carSmall}</span>
@@ -603,44 +651,54 @@ async function renderProject(pkey) {
         <div>
           <span class="pixel tag">CIRCUIT · ${esc(pkey)}</span>
           <h1>${esc(project.name)}</h1>
-          <p class="muted">Pick your team. A team page shows its own part of this Jira project (its filter),
-          and fills in the team's work group, components and labels on everything the team creates.
+          <p class="muted">Pick your team. Every Jira board in this project is a team: it shows the issues in the board's filter,
+          with the board's columns on the Kanban. In ⚙ Team settings you choose what gets filled in on everything the team creates.
           ${project.url ? `<a class="ext" href="${esc(project.url)}" target="_blank" rel="noopener">Open in Jira ↗</a>` : ''}</p>
         </div>
-        <div class="actions">
-          <button class="btn primary" id="new-team" type="button">+ New team page</button>
-        </div>
+        ${
+          teams.length
+            ? `<div class="actions">
+          <input id="board-filter" class="input" type="search" placeholder="Filter boards…" value="${esc(boardFilter)}" aria-label="Filter boards" />
+        </div>`
+            : ''
+        }
       </div>
+      <p class="muted" id="board-none" hidden></p>
       <div class="grid teams">
         ${teams.map(teamCard).join('')}
-        <button class="card team-card add-card" id="new-team-2" type="button">
-          <span class="plus pixel">+</span><span>New team page</span>
-        </button>
         <a class="card team-card all-card" href="${teamHref(pkey, ALL_TEAM)}">
           <span class="pixel tag">WHOLE PROJECT</span>
           <h2>All of ${esc(project.name)}</h2>
-          <span class="muted small-text">Every feature in ${esc(pkey)}, with no team filter and nothing filled in automatically.</span>
+          <span class="muted small-text">Every feature in ${esc(pkey)}, with no board filter and nothing filled in automatically.</span>
         </a>
       </div>
-      ${teams.length === 0 ? '<p class="muted center">No team pages yet. Create one to set up a filter and the team’s work group, components and labels.</p>' : ''}
+      ${
+        boardsError
+          ? `<p class="form-error center">Jira boards couldn't be listed (${esc(boardsError)}). Teams come from the project's boards, so Bug Rally needs the Jira Software permissions (see <a href="#/settings">Settings</a>).</p>`
+          : teams.length === 0
+            ? '<p class="muted center">This project has no Jira boards yet. Create a board in Jira and it shows up here as a team.</p>'
+            : ''
+      }
     </section>`;
 
-  const newTeam = () =>
-    openForm({
-      title: 'NEW TEAM PAGE',
-      intro: `A team page lives only in Bug Rally. Next you'll choose its filter and what gets filled in on new issues.`,
-      fields: [{ name: 'name', label: 'Team name', required: true, placeholder: 'Team Rocket', maxlength: 80 }],
-      submit: 'Create team page',
-      async onSubmit({ name }) {
-        const t = await api(`/projects/${enc(pkey)}/teams`, { method: 'POST', body: { name } });
-        delete state.teams[pkey];
-        Sound.play('spawn');
-        toast(`Team page ${t.name} created. Now set its filter and defaults.`, 'success');
-        location.hash = teamHref(pkey, t.id, '/settings');
-      },
+  // Filter the boards by name; Whole project always stays.
+  const applyBoardFilter = (q) => {
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+    let shown = 0;
+    $$('.team-card[data-search]').forEach((c) => {
+      const hit = words.every((w) => c.dataset.search.includes(w));
+      c.hidden = !hit;
+      if (hit) shown += 1;
     });
-  $('#new-team').addEventListener('click', newTeam);
-  $('#new-team-2').addEventListener('click', newTeam);
+    const none = $('#board-none');
+    none.hidden = !words.length || shown > 0;
+    none.textContent = `No boards match “${q}”.`;
+  };
+  $('#board-filter')?.addEventListener('input', (e) => {
+    store.set(filterKey, e.target.value);
+    applyBoardFilter(e.target.value);
+  });
+  applyBoardFilter(boardFilter);
 
   // Fill in each team's progress in the background.
   for (const t of teams) {
@@ -697,6 +755,7 @@ async function renderTeam(pkey, tid) {
         <span class="key">${f.pseudo ? 'No feature' : esc(f.key)}${f.done ? ' · feature done' : ''}${
           f.linked ? ` <span class="link-tag" title="Linked from another project">🔗 ${esc(f.projectKey)}</span>` : ''
         }</span>
+        ${!clear && (dueBadge(f) || dueSummary(f.items)) ? `<div class="card-due">${dueBadge(f)} ${dueSummary(f.items)}</div>` : ''}
         <div class="minibar" role="img" aria-label="${s.pct}% complete">
           <div class="fill" style="width:${s.pct}%"></div>
           <span class="minihero" style="left:${s.pct}%">${SPRITES.carSmall}</span>
@@ -834,7 +893,7 @@ function teamDefaultsChips(team) {
     : '';
 }
 
-// Unfinished stages in Jira order; finished ones (feature marked done) newest first, oldest last.
+// Unfinished stages in Jira Rank order (top = highest); finished ones (feature marked done) newest first, oldest last.
 function stageOrder(features) {
   const open = features.filter((f) => !f.done);
   const finished = features
@@ -845,6 +904,7 @@ function stageOrder(features) {
 
 function filterSummary(world, pkey) {
   const f = world?.filter;
+  if (f?.mode === 'board') return `Jira board: ${world.name}`;
   if (!f || f.mode === 'project') return `Whole project ${pkey}`;
   if (f.mode === 'saved') return `Saved filter: ${f.filterName || f.filterId}`;
   return `JQL: ${f.jql}`;
@@ -1025,6 +1085,24 @@ function editColumns(kb, saveLayout) {
   dlg.showModal();
 }
 
+// Make the Kanban (features rail and columns) fill the rest of the window below the page header,
+// so the page itself doesn't scroll; long columns scroll inside.
+function fitKanban() {
+  const wrap = $('.kanban-wrap');
+  if (!wrap) return;
+  if (window.innerWidth <= 720) {
+    wrap.style.removeProperty('--kb-h');
+    return;
+  }
+  const top = wrap.getBoundingClientRect().top + window.scrollY;
+  wrap.style.setProperty('--kb-h', `${Math.max(320, Math.floor(window.innerHeight - top - 30))}px`);
+}
+let fitTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(fitKanban, 80);
+});
+
 /* =========================================================
    Screen 2a: Kanban for a team page (ranked by Jira Rank)
    ========================================================= */
@@ -1034,7 +1112,7 @@ async function renderKanban(pkey, tid) {
   const [board, kb, boards] = await Promise.all([
     loadBoard(pkey, tid),
     api(`/projects/${enc(pkey)}/teams/${enc(tid)}/kanban`),
-    api(`/projects/${enc(pkey)}/boards`).catch((e) => ({ error: e.message })),
+    tid === ALL_TEAM ? api(`/projects/${enc(pkey)}/boards`).catch((e) => ({ error: e.message })) : [],
   ]);
   const boardsError = Array.isArray(boards) ? null : boards.error;
   const boardList = Array.isArray(boards) ? boards : [];
@@ -1070,6 +1148,7 @@ async function renderKanban(pkey, tid) {
       </div>
       <div class="kc-sum">${esc(it.summary)}</div>
       <div class="kc-meta">
+        ${dueBadge(it)}
         ${grouped ? `<span class="kc-status">${esc(it.statusName)}</span>` : ''}
         ${
           it.parentKey
@@ -1098,8 +1177,8 @@ async function renderKanban(pkey, tid) {
     boardOptions.push({ id: kb.layout.boardId, name: kb.layout.boardName || `Board ${kb.layout.boardId}` });
   }
 
-  // Left rail: the team's unfinished features with progress. Not part of the board (no dropping here);
-  // clicking one highlights its cards.
+  // Left rail: the team's unfinished features in rank order, with progress. Drag a feature to rank it,
+  // drop a card on one to move the card into that feature, click one to highlight its cards.
   const focusKey = `${pkey}/${tid}`;
   const onBoard = (fk) => kb.issues.filter((i) => !i.done && (fk === '_none' ? !i.parentKey : i.parentKey === fk)).length;
   const hasDoneColumn = kb.columns.some((c) => c.category === 'done');
@@ -1110,21 +1189,26 @@ async function renderKanban(pkey, tid) {
       const s = stats(f.items);
       const bugsLeft = s.bugsTotal - s.bugsDone;
       return `
-        <div class="kfeat" data-feature="${esc(f.key)}">
-          <button type="button" class="kf-select" data-focus="${esc(f.key)}" aria-pressed="false" title="Highlight this feature's cards">
-            <span class="kf-top"><span class="pixel kf-stage">STAGE ${i + 1}</span><span class="kf-count">${onBoard(f.key)} on board</span></span>
+        <div class="kfeat" data-feature="${esc(f.key)}" draggable="true">
+          <button type="button" class="kf-select" data-focus="${esc(f.key)}" aria-pressed="false"
+            title="Click to highlight this feature's cards, or its ID for details. Drag to change its rank (Alt+↑ / Alt+↓)."
+            aria-label="${esc(`Stage ${i + 1}: ${f.key} ${f.summary}. Click to highlight its cards. Shift+Enter for details. Alt+Up or Alt+Down to change rank.`)}">
+            <span class="kf-top"><span class="pixel kf-stage">STAGE ${i + 1}</span><span class="kf-count">${
+              onBoard(f.key) || !f.items.some((x) => !x.done) ? `${onBoard(f.key)} on board` : f.linked ? 'outside filter' : '0 on board'
+            }</span></span>
             <span class="kf-name">${esc(f.summary)}</span>
-            <span class="kf-key">${esc(f.key)}${s.total && s.pct === 100 ? ' · <span class="ready-tag">Ready to mark done</span>' : ''}</span>
+            <span class="kf-key"><span class="kf-id" data-info="${esc(f.key)}" title="Show feature details: description, comments, attachments">${esc(f.key)}</span>${s.total && s.pct === 100 ? ' · <span class="ready-tag">Ready to mark done</span>' : ''}</span>
             <span class="minibar" role="img" aria-label="${s.pct}% complete"><span class="fill" style="width:${s.pct}%"></span><span class="minihero" style="left:${s.pct}%">${SPRITES.carSmall}</span></span>
             <span class="kf-stats">${SPRITES.checkeredSmall} ${s.tasksDone}/${s.tasksTotal} · ${SPRITES.coneIcon} ${bugsLeft} open · <b>${s.pct}%</b></span>
+            ${dueBadge(f) || dueSummary(f.items) ? `<span class="kf-due">${dueBadge(f)} ${dueSummary(f.items)}</span>` : ''}
           </button>
-          <a class="kf-open" href="${teamHref(pkey, tid, `/f/${enc(f.key)}`)}" title="Open the stage">🏁</a>
+          <a class="kf-open" href="${teamHref(pkey, tid, `/f/${enc(f.key)}`)}" title="Open the stage" draggable="false">🏁</a>
         </div>`;
     };
     return `
       <aside class="kfeatures" aria-label="Unfinished features">
         <header><span class="kcol-name">🏁 Features</span><span class="count">${open.length}</span></header>
-        <p class="kf-sub">Not part of the board. Click one to highlight its cards.</p>
+        <p class="kf-sub">Sorted by rank. Drag a feature to re-rank it. Drop a card on a feature to move it there. Click one to highlight its cards.</p>
         <button type="button" class="linklike kf-clear" id="kf-clear" hidden>✕ Show all cards</button>
         <div class="kf-list">
           ${open.map(item).join('') || '<p class="muted small-text">No unfinished features.</p>'}
@@ -1157,6 +1241,11 @@ async function renderKanban(pkey, tid) {
       </div>
       ${viewTabs(pkey, tid, 'kanban')}
       <div class="kanban-bar">
+        ${
+          team.boardId
+            ? `<span class="small-text">Columns from the Jira board <b>${esc(team.name)}</b>. Change them on the board in Jira.</span>
+               ${kb.layoutError ? `<span class="form-error small-text">${esc(kb.layoutError)}</span>` : ''}`
+            : `
         <label class="layout-pick">Columns
           <select id="kb-layout" aria-label="Kanban columns">
             ${boardOptions.map((b) => `<option value="board:${esc(b.id)}" ${layoutValue === `board:${b.id}` ? 'selected' : ''}>Like Jira board: ${esc(b.name)}</option>`).join('')}
@@ -1173,11 +1262,13 @@ async function renderKanban(pkey, tid) {
             : !boardList.length
               ? '<span class="muted small-text">No Jira boards found for this project.</span>'
               : ''
+        }`
         }
       </div>
       <p class="muted small-text kanban-help">
+        ${dueSummary(unfinished)}
         ${unfinished.length} unfinished, ${bugsOpen} of them ${/^bugs?$/i.test(bugName) ? 'bugs' : `${esc(bugName.toLowerCase())}s or bugs`}. Sorted by Jira Rank, top = highest.
-        Drag a card above another to change its rank, or to another column to change its status. Drop on <b>Done</b> to finish it.
+        Drag a card above another to change its rank, or to another column to change its status. Drop on <b>Done</b> to finish it, or on a feature on the left to move it into that feature.
         Keyboard: focus a card and press Alt+↑ / Alt+↓.
       </p>
       <div class="kanban-wrap">
@@ -1213,8 +1304,8 @@ async function renderKanban(pkey, tid) {
     await api(`/projects/${enc(pkey)}/teams/${enc(tid)}/kanban-layout`, { method: 'PUT', body: layout });
     renderKanban(pkey, tid);
   };
-  $('#edit-cols').addEventListener('click', () => editColumns(kb, saveLayout));
-  $('#kb-layout').addEventListener('change', async (e) => {
+  $('#edit-cols')?.addEventListener('click', () => editColumns(kb, saveLayout));
+  $('#kb-layout')?.addEventListener('change', async (e) => {
     const v = e.target.value;
     if (v === 'custom') {
       e.target.value = layoutValue; // stays until the editor is saved
@@ -1233,6 +1324,7 @@ async function renderKanban(pkey, tid) {
   });
 
   const kboard = $('#kboard');
+  fitKanban();
 
   // Highlight the cards of the chosen feature; everything else fades.
   const applyFocus = () => {
@@ -1251,12 +1343,24 @@ async function renderKanban(pkey, tid) {
     $('#kf-clear').hidden = !fk;
   };
   $$('[data-focus]').forEach((b) =>
-    b.addEventListener('click', () => {
+    b.addEventListener('click', (e) => {
+      const id = e.target.closest('[data-info]');
+      if (id) return featureDetails(id.dataset.info);
       state.kanbanFocus[focusKey] = state.kanbanFocus[focusKey] === b.dataset.focus ? null : b.dataset.focus;
       applyFocus();
       const first = $('.kcard.hl', kboard);
       if (first) first.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
       else if (state.kanbanFocus[focusKey]) toast('None of its unfinished cards are on the board.');
+    }),
+  );
+  // The feature's ID opens its details (Shift+Enter from the keyboard); the rest of the button highlights.
+  const featureDetails = (key) => openDrawer(board.features.find((x) => x.key === key), ctx);
+  $$('[data-focus]').forEach((b) =>
+    b.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.shiftKey && b.dataset.focus !== '_none') {
+        e.preventDefault();
+        featureDetails(b.dataset.focus);
+      }
     }),
   );
   $('#kf-clear').addEventListener('click', () => {
@@ -1369,6 +1473,138 @@ async function renderKanban(pkey, tid) {
     commitMove(card, move);
   });
 
+  // Features rail: drag a feature to re-rank it; drop a card on a feature to move it into that feature.
+  const rail = $('.kfeatures');
+  const railList = $('.kf-list', rail);
+  let featDragged = null;
+  const featPlaceholder = document.createElement('div');
+  featPlaceholder.className = 'kf-placeholder';
+  const clearDropTargets = () => $$('.kfeat.drop-target', rail).forEach((x) => x.classList.remove('drop-target'));
+  const renumber = () =>
+    $$('.kfeat[draggable="true"] .kf-stage', railList).forEach((el, i) => (el.textContent = `STAGE ${i + 1}`));
+
+  rail.addEventListener('dragstart', (e) => {
+    const f = e.target.closest?.('.kfeat[draggable="true"]');
+    if (!f) return;
+    featDragged = f;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', f.dataset.feature);
+    featPlaceholder.style.height = `${f.offsetHeight}px`;
+    requestAnimationFrame(() => f.classList.add('dragging'));
+  });
+  rail.addEventListener('dragend', () => {
+    featDragged?.classList.remove('dragging');
+    featPlaceholder.remove();
+    featDragged = null;
+    clearDropTargets();
+  });
+  rail.addEventListener('dragover', (e) => {
+    if (featDragged) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const feats = [...railList.querySelectorAll('.kfeat[draggable="true"]:not(.dragging)')];
+      const next = feats.find((f) => {
+        const r = f.getBoundingClientRect();
+        return e.clientY < r.top + r.height / 2;
+      });
+      const noneRow = $('.kfeat.none', railList);
+      const anchor = next || noneRow;
+      if (featPlaceholder.nextElementSibling !== anchor) anchor.before(featPlaceholder);
+      return;
+    }
+    if (!dragged) return;
+    const target = e.target.closest('.kfeat');
+    placeholder.remove(); // the card isn't going into a column
+    $$('.klist.over', kboard).forEach((l) => l.classList.remove('over'));
+    clearDropTargets();
+    if (!target) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    target.classList.add('drop-target');
+  });
+  rail.addEventListener('dragleave', (e) => {
+    if (!rail.contains(e.relatedTarget)) clearDropTargets();
+  });
+  rail.addEventListener('drop', async (e) => {
+    if (featDragged) {
+      e.preventDefault();
+      const f = featDragged;
+      if (!featPlaceholder.isConnected) return;
+      let next = featPlaceholder.nextElementSibling;
+      while (next && (next === f || !next.matches('.kfeat[draggable="true"]'))) next = next.nextElementSibling;
+      let prev = featPlaceholder.previousElementSibling;
+      while (prev && (prev === f || !prev.matches('.kfeat[draggable="true"]'))) prev = prev.previousElementSibling;
+      const oldNext = (() => {
+        let n = f.nextElementSibling;
+        while (n && !n.matches('.kfeat[draggable="true"]')) n = n.nextElementSibling;
+        return n;
+      })();
+      featPlaceholder.replaceWith(f);
+      if (next === oldNext && next !== f) return; // dropped where it already was
+      const move = next ? { before: next.dataset.feature } : prev ? { after: prev.dataset.feature } : null;
+      if (!move) return;
+      renumber();
+      commitFeatureRank(f, move);
+      return;
+    }
+    if (!dragged) return;
+    const target = e.target.closest('.kfeat');
+    clearDropTargets();
+    if (!target) return;
+    e.preventDefault();
+    const card = dragged;
+    const it = byKey.get(card.dataset.key);
+    const parentKey = target.dataset.feature === '_none' ? null : target.dataset.feature;
+    if ((it?.parentKey || null) === parentKey) {
+      toast(parentKey ? `${it.key} is already in that feature.` : `${it.key} isn't in any feature.`);
+      return;
+    }
+    card.classList.add('saving');
+    try {
+      const res = await api(`/issues/${enc(card.dataset.key)}/parent`, {
+        method: 'PUT',
+        body: { parentKey, worldKey: pkey, teamId: tid },
+      });
+      reportDefaults(res);
+      for (const k of Object.keys(state.boards)) if (k.startsWith(`${pkey}/`)) delete state.boards[k];
+      const name = parentKey ? board.features.find((x) => x.key === parentKey)?.summary || parentKey : 'no feature';
+      Sound.play('coin');
+      toast(`${card.dataset.key} → ${name}`, 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+    renderKanban(pkey, tid); // updates the card's feature and every feature's progress
+  });
+  // Keyboard: Alt+↑ / Alt+↓ on a feature moves it one place.
+  railList.addEventListener('keydown', (e) => {
+    if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    const f = e.target.closest('.kfeat[draggable="true"]');
+    if (!f) return;
+    e.preventDefault();
+    const sib = e.key === 'ArrowUp' ? f.previousElementSibling : f.nextElementSibling;
+    if (!sib?.matches('.kfeat[draggable="true"]')) return;
+    if (e.key === 'ArrowUp') sib.before(f);
+    else sib.after(f);
+    f.querySelector('.kf-select').focus();
+    renumber();
+    commitFeatureRank(f, e.key === 'ArrowUp' ? { before: sib.dataset.feature } : { after: sib.dataset.feature });
+  });
+
+  async function commitFeatureRank(f, move) {
+    f.classList.add('saving');
+    try {
+      await api(`/issues/${enc(f.dataset.feature)}/move`, { method: 'POST', body: move });
+      for (const k of Object.keys(state.boards)) if (k.startsWith(`${pkey}/`)) delete state.boards[k];
+      f.classList.remove('saving');
+      f.classList.add('moved');
+      setTimeout(() => f.classList.remove('moved'), 900);
+    } catch (err) {
+      toast(err.message, 'error');
+      await loadBoard(pkey, tid, true);
+      renderKanban(pkey, tid); // back to the order Jira has
+    }
+  }
+
   async function commitMove(card, move) {
     const key = card.dataset.key;
     card.classList.add('saving');
@@ -1434,72 +1670,40 @@ async function renderTeamSettings(pkey, tid) {
     <li>
       <span class="q-key">${esc(x.key)}</span>
       <span class="q-sum">${esc(x.summary)}</span>
-      <span class="q-status">${x.linked ? `🔗 from ${esc(x.projectKey)}` : 'matches filter'}</span>
+      <span class="q-status">${x.linked ? `🔗 from ${esc(x.projectKey)}` : 'on the board'}</span>
       <button type="button" class="btn small" data-${action}="${esc(x.key)}">${label}</button>
     </li>`;
-  const radio = (mode, label, extra = '') =>
-    `<label class="radio"><input type="radio" name="mode" value="${mode}" ${f.mode === mode ? 'checked' : ''} ${
-      mode !== 'project' && !filtersOk ? 'disabled' : ''
-    } /> <span>${label}</span>${extra}</label>`;
-
   app.innerHTML = `
     <section class="screen">
       <div class="screen-head">
         <div>
           <span class="pixel tag">TEAM SETTINGS · ${esc(board.project.name)}</span>
           <h1>${esc(world.name)}</h1>
-          <p class="muted">Decide what this team sees from Jira project ${esc(pkey)}, and what gets filled in automatically when the team creates issues here.
-          Team pages only exist in Bug Rally; nothing here changes Jira.</p>
+          <p class="muted">What gets filled in automatically when this team creates issues, and which extra features it shows.
+          These settings only exist in Bug Rally; nothing here changes Jira.</p>
         </div>
         <div class="actions">
           <a class="btn" href="${teamHref(pkey, tid)}">← Back to team</a>
-          <button class="btn danger" id="delete-team" type="button">Delete team page</button>
         </div>
       </div>
 
       <form id="world-form" class="settings-grid" autocomplete="off">
         <div class="stack">
           <div class="pixel-box">
-            <h2 class="pixel box-title">GENERAL</h2>
-            <label class="field"><span>Team name</span>
-              <input name="name" maxlength="80" required placeholder="Team Rocket" value="${esc(world.name)}" />
-              <small class="muted">Shown in Bug Rally only. New issues are created in Jira project <b>${esc(pkey)}</b> (${esc(jiraName)}).</small>
-            </label>
-          </div>
-
-          <div class="pixel-box">
-            <h2 class="pixel box-title">FILTER</h2>
-            <p class="muted small-text">Which Jira issues belong to this world. Features (epics) that match become levels.</p>
-            ${!filtersOk ? `<p class="form-error small-text">${esc(options.error || 'Filters need a Jira connection. In demo mode every team page shows the whole project.')}</p>` : ''}
-            <div class="radios">
-              ${radio('project', `Whole project <code>project = ${esc(pkey)}</code>`)}
-              ${radio('jql', 'JQL query')}
-              <div class="mode-panel" data-panel="jql">
-                <textarea name="jql" rows="3" class="code-input" placeholder='project = ${esc(pkey)} AND component = "Web"'>${esc(f.jql)}</textarea>
-                <small class="muted">Any JQL works, also across projects. ORDER BY is ignored.</small>
-              </div>
-              ${radio('saved', 'Saved Jira filter')}
-              <div class="mode-panel" data-panel="saved">
-                <input type="hidden" name="filterId" value="${esc(f.filterId)}" />
-                <input type="hidden" name="filterName" value="${esc(f.filterName)}" />
-                <div class="picked" id="picked-filter">${f.filterId ? `Selected: <b>${esc(f.filterName || f.filterId)}</b>` : '<span class="muted">No filter picked yet.</span>'}</div>
-                <input type="search" id="filter-q" class="input wide" placeholder="Search your saved filters…" aria-label="Search saved filters" />
-                <ul class="results compact" id="filter-results"></ul>
-              </div>
-            </div>
-            <label class="check-label"><input type="checkbox" name="applyToItems" ${f.applyToItems ? 'checked' : ''} ${!filtersOk ? 'disabled' : ''} />
-              Also filter the tasks and bugs inside each feature</label>
-            <div class="test-row">
-              <button type="button" class="btn" id="test-filter" ${!filtersOk ? 'disabled' : ''}>Test filter</button>
-              <span id="test-result" class="small-text"></span>
-            </div>
+            <h2 class="pixel box-title">JIRA BOARD</h2>
+            <p>This team is the Jira board <b>${esc(world.name)}</b>. It shows the issues in the board's filter, and its Kanban uses the board's columns.
+            To change which issues belong to the team, or its columns, edit the board in Jira.</p>
+            ${!filtersOk ? `<p class="form-error small-text">${esc(options.error || 'In demo mode every board shows the whole project.')}</p>` : ''}
+            <label class="check-label"><input type="checkbox" name="applyToItems" ${f.applyToItems ? 'checked' : ''} />
+              Also filter the tasks and bugs inside each feature (untick to show all of a feature's issues, even ones not on the board)</label>
+            <small class="muted">New issues are created in Jira project <b>${esc(pkey)}</b> (${esc(jiraName)}).</small>
           </div>
         </div>
 
         <div class="stack">
           <div class="pixel-box">
             <h2 class="pixel box-title">DEFAULTS FOR NEW ISSUES</h2>
-            <p class="muted small-text">Set automatically on every task, story, bug and feature you create in this world.</p>
+            <p class="muted small-text">Set automatically on every task, story, bug and feature you create from this team page.</p>
             ${options.error ? `<p class="form-error small-text">Couldn't load the project's fields: ${esc(options.error)}</p>` : ''}
             <label class="field"><span>Labels</span>
               <input name="labels" placeholder="frontend team-rocket" value="${esc(d.labels.join(' '))}" />
@@ -1548,9 +1752,9 @@ async function renderTeamSettings(pkey, tid) {
 
       <div class="settings-grid levels-settings">
         <div class="pixel-box">
-          <h2 class="pixel box-title">LEVELS IN THIS WORLD <small>${board.features.length}</small></h2>
+          <h2 class="pixel box-title">FEATURES ON THIS TEAM <small>${board.features.length}</small></h2>
           <ul class="plain-list">
-            ${board.features.map((x) => (x.linked ? row(x, 'unlink', 'Unlink') : row(x, 'hide', 'Hide'))).join('') || '<li class="muted">No features match yet.</li>'}
+            ${board.features.map((x) => (x.linked ? row(x, 'unlink', 'Unlink') : row(x, 'hide', 'Hide'))).join('') || '<li class="muted">No features on the board yet.</li>'}
           </ul>
           <button class="btn" id="link-feature" type="button">🔗 Link existing feature</button>
         </div>
@@ -1560,59 +1764,12 @@ async function renderTeamSettings(pkey, tid) {
             ${(board.hiddenFeatures || []).map((x) => row(x, 'show', 'Show')).join('') || '<li class="muted">Nothing hidden.</li>'}
             ${missing.map((k) => `<li><span class="q-key">${esc(k)}</span><span class="q-sum muted">Linked, but Jira no longer returns it</span><span></span><button type="button" class="btn small" data-unlink="${esc(k)}">Remove</button></li>`).join('')}
           </ul>
-          <p class="muted small-text">Linked features show up whatever the filter says. Hidden ones stay hidden even if they match.</p>
+          <p class="muted small-text">Linked features show up whatever the board's filter says, with all their issues. Hidden ones stay hidden even if they're on the board.</p>
         </div>
       </div>
     </section>`;
 
   const form = $('#world-form');
-
-  // Filter mode panels
-  const syncMode = () => {
-    const mode = form.elements.mode.value;
-    $$('.mode-panel', form).forEach((p) => (p.hidden = p.dataset.panel !== mode));
-  };
-  form.addEventListener('change', (e) => {
-    if (e.target.name === 'mode') syncMode();
-  });
-  syncMode();
-
-  // Saved filter picker
-  const fq = $('#filter-q');
-  const fr = $('#filter-results');
-  let ft;
-  let fseq = 0;
-  const loadFilters = async () => {
-    const my = ++fseq;
-    fr.innerHTML = '<li class="muted">Searching…</li>';
-    try {
-      const list = await api(`/filters?q=${encodeURIComponent(fq.value)}`);
-      if (my !== fseq) return;
-      fr.innerHTML =
-        list
-          .map(
-            (x) => `<li><span class="r-main"><b>${esc(x.name)}</b><small class="muted">${esc(x.jql)}${x.owner ? ` · by ${esc(x.owner)}` : ''}</small></span>
-            <button type="button" class="btn small" data-filter="${esc(x.id)}" data-name="${esc(x.name)}" data-jql="${esc(x.jql)}">Use</button></li>`,
-          )
-          .join('') || '<li class="muted">No saved filters found.</li>';
-    } catch (e) {
-      if (my === fseq) fr.innerHTML = `<li class="form-error">${esc(e.message)}</li>`;
-    }
-  };
-  fq.addEventListener('input', () => {
-    clearTimeout(ft);
-    ft = setTimeout(loadFilters, 300);
-  });
-  fq.addEventListener('focus', () => !fr.children.length && filtersOk && loadFilters(), { once: true });
-  fr.addEventListener('click', (e) => {
-    const b = e.target.closest('[data-filter]');
-    if (!b) return;
-    form.elements.filterId.value = b.dataset.filter;
-    form.elements.filterName.value = b.dataset.name;
-    $('#picked-filter').innerHTML = `Selected: <b>${esc(b.dataset.name)}</b> <code>${esc(b.dataset.jql)}</code>`;
-    fr.innerHTML = '';
-    fq.value = '';
-  });
 
   // Work group value control depends on the chosen field
   const wgField = $('#wg-field');
@@ -1641,30 +1798,7 @@ async function renderTeamSettings(pkey, tid) {
   wgField.addEventListener('change', drawWgValue);
   drawWgValue();
 
-  const readFilter = () => ({
-    mode: form.elements.mode.value,
-    jql: form.elements.jql.value,
-    filterId: form.elements.filterId.value,
-    filterName: form.elements.filterName.value,
-    applyToItems: form.elements.applyToItems.checked,
-  });
-
-  $('#test-filter').addEventListener('click', async (e) => {
-    const out = $('#test-result');
-    e.target.disabled = true;
-    out.className = 'small-text muted';
-    out.textContent = 'Asking Jira…';
-    try {
-      const r = await api(`/projects/${enc(pkey)}/teams/${enc(tid)}/test-filter`, { method: 'POST', body: { filter: readFilter() } });
-      out.className = 'small-text ok-text';
-      out.textContent = `✓ Matches about ${r.issues} issues, ${r.features} of them features.`;
-    } catch (err) {
-      out.className = 'small-text form-error';
-      out.textContent = err.message;
-    } finally {
-      e.target.disabled = !filtersOk;
-    }
-  });
+  const readFilter = () => ({ applyToItems: form.elements.applyToItems.checked });
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -1673,7 +1807,6 @@ async function renderTeamSettings(pkey, tid) {
     const field = fields.find((x) => x.id === wgField.value);
     const wgValueEl = form.elements.wgValue;
     const body = {
-      name: form.elements.name.value,
       filter: readFilter(),
       defaults: {
         labels: form.elements.labels.value.split(/[\s,]+/).filter(Boolean),
@@ -1728,21 +1861,6 @@ async function renderTeamSettings(pkey, tid) {
     b.addEventListener('click', () => update(() => (lists.linked = lists.linked.filter((k) => k !== b.dataset.unlink)))),
   );
   $('#link-feature').addEventListener('click', () => linkFeatureSearch(pkey, tid, board, () => renderTeamSettings(pkey, tid)));
-  $('#delete-team').addEventListener('click', () =>
-    openForm({
-      title: 'DELETE TEAM PAGE',
-      intro: `Delete the team page <b>${esc(world.name)}</b> and its settings? Nothing in Jira is changed or deleted.`,
-      fields: [],
-      submit: 'Delete team page',
-      async onSubmit() {
-        await api(`/projects/${enc(pkey)}/teams/${enc(tid)}`, { method: 'DELETE' });
-        delete state.teams[pkey];
-        delete state.boards[`${pkey}/${tid}`];
-        toast(`Team page ${world.name} deleted`);
-        location.hash = `#/p/${enc(pkey)}`;
-      },
-    }),
-  );
 }
 
 /* =========================================================
@@ -1797,9 +1915,10 @@ function scenery(width, seed) {
 }
 
 function entityHtml(it, i, x) {
-  const label = `<span class="ent-label">${esc(it.key)}</span>`;
+  const due = dueInfo(it);
+  const label = `<span class="ent-label ${due ? `due ${due.level}` : ''}">${due ? '⏰ ' : ''}${esc(it.key)}</span>`;
   const isNew = state.justCreated === it.key ? 'spawn' : '';
-  const aria = `${it.typeName} ${it.key}: ${it.summary}. ${it.done ? 'Done' : 'Open'}.`;
+  const aria = `${it.typeName} ${it.key}: ${it.summary}. ${it.done ? 'Done' : 'Open'}.${due ? ` ${due.text}.` : ''}`;
   if (it.type === 'bug') {
     return `<button type="button" class="ent bug ${it.done ? 'done' : ''} ${isNew}" data-key="${esc(it.key)}"
       style="left:${x}px;bottom:${GROUND}px;--d:${(i * 0.37) % 1.5}s" aria-label="${esc(aria)}">
@@ -1866,6 +1985,7 @@ async function renderLevel(pkey, tid, fkey) {
              </select>`
           : ''
       }
+      ${dueBadge(it)}
       <span class="q-status">${esc(it.statusName)}</span>
       ${it.url ? `<a class="q-link" href="${esc(it.url)}" target="_blank" rel="noopener" title="Open in Jira">↗</a>` : ''}
     </li>`;
@@ -1881,6 +2001,8 @@ async function renderLevel(pkey, tid, fkey) {
           <h1>${esc(feature.summary)}</h1>
           <span class="key">${feature.pseudo ? 'Issues in this project with no feature' : esc(feature.key)}
             ${feature.pseudo ? '' : ` · ${esc(feature.statusName)}`}
+            ${feature.duedate && !feature.pseudo ? ` · due ${esc(fmtDay(feature.duedate))} ${dueBadge(feature)}` : ''}
+            ${dueSummary(feature.items) ? ` · ${dueSummary(feature.items)}` : ''}
             ${feature.linked ? ` · <span class="link-tag">🔗 linked from ${esc(feature.projectKey)}</span>` : ''}
             ${feature.pseudo ? '' : ` · <button type="button" class="linklike ext" id="feature-details">Feature details</button>`}
             ${feature.url ? ` · <a class="ext" href="${esc(feature.url)}" target="_blank" rel="noopener">Open in Jira ↗</a>` : ''}</span>
@@ -2074,6 +2196,19 @@ function attachmentsHtml(d) {
     <ul class="uploads" id="uploads"></ul>`;
 }
 
+// One child or related ticket in the details panel. Clicking it opens its details.
+function relRow(x) {
+  const icon = x.type === 'bug' ? SPRITES.coneIcon : x.type === 'story' ? SPRITES.storyIcon : x.type === 'epic' ? '🏁' : SPRITES.taskIcon;
+  return `<li class="${x.done ? 'done' : ''}">
+    <button type="button" class="rel-open" data-drawer-open="${esc(x.key)}" title="Show details of ${esc(x.key)}">
+      <span class="q-icon" title="${esc(x.typeName)}">${icon}</span>
+      <span class="q-key">${esc(x.key)}</span>
+      <span class="q-sum">${esc(x.summary)}</span>
+      <span class="q-status ${x.done ? 'done' : ''}">${esc(x.statusName)}</span>
+    </button>
+  </li>`;
+}
+
 function detailHtml() {
   const { it, d, ctx } = dz;
   const isFeature = it.type === 'epic';
@@ -2104,6 +2239,11 @@ function detailHtml() {
 
   return `
     <div class="drawer-head">
+      ${
+        dz.trail.length
+          ? `<button type="button" class="icon-btn" data-drawer-back title="Back to ${esc(dz.trail[dz.trail.length - 1].key)}" aria-label="Back to ${esc(dz.trail[dz.trail.length - 1].key)}">←</button>`
+          : ''
+      }
       <span class="chip ${esc(it.type)}">${esc(it.typeName)}</span>
       <span class="key">${esc(it.key)}</span>
       <button type="button" class="icon-btn" data-close aria-label="Close details">✕</button>
@@ -2122,7 +2262,7 @@ function detailHtml() {
         ${meta('Reporter', esc(d?.reporter || ''))}
         ${meta('Created', esc(fmtDate(d?.created || it.created)))}
         ${meta('Updated', esc(fmtDate(d?.updated)))}
-        ${meta('Due', esc(fmtDate(d?.duedate)))}
+        ${meta('Due', d?.duedate ? `${esc(fmtDay(d.duedate))} ${dueBadge(d)}` : '')}
         ${d?.labels?.length ? meta('Labels', chips(d.labels)) : ''}
         ${d?.components?.length ? meta('Components', chips(d.components)) : ''}
         ${d?.workGroup ? meta(esc(d.workGroup.name), esc(d.workGroup.value || 'Not set')) : ''}
@@ -2155,16 +2295,36 @@ function detailHtml() {
         ${attachmentsHtml(d)}
       </section>
 
-      ${
-        d?.subtasks?.length
-          ? `<section class="drawer-section">
-        <h3 class="pixel">SUB-TASKS <small>${d.subtasks.filter((x) => x.done).length}/${d.subtasks.length}</small></h3>
-        <ul class="subtasks">${d.subtasks
-          .map((x) => `<li class="${x.done ? 'done' : ''}"><span class="q-key">${esc(x.key)}</span> <span class="q-sum">${esc(x.summary)}</span> <span class="q-status">${esc(x.statusName)}</span></li>`)
-          .join('')}</ul>
-      </section>`
-          : ''
-      }
+      <section class="drawer-section">
+        <h3 class="pixel">${isFeature ? 'CHILD ITEMS' : 'CHILD ITEMS · SUB-TASKS'} ${
+          d ? `<small>${d.children.filter((x) => x.done).length}/${d.children.length} done</small>` : ''
+        }</h3>
+        ${
+          d
+            ? d.children.length
+              ? `<ul class="subtasks rel-list">${d.children.map((x) => relRow(x)).join('')}</ul>`
+              : `<p class="muted">${isFeature ? 'No tasks, stories or bugs in this feature yet.' : 'No sub-tasks.'}</p>`
+            : loading
+        }
+      </section>
+
+      <section class="drawer-section">
+        <h3 class="pixel">RELATED TICKETS ${d ? `<small>${d.links.length}</small>` : ''}</h3>
+        ${
+          d
+            ? d.links.length
+              ? Object.entries(
+                  d.links.reduce((g, l) => ((g[l.relation] ||= []).push(l.issue), g), {}),
+                )
+                  .map(
+                    ([rel, list]) =>
+                      `<p class="rel-type">${esc(rel)}</p><ul class="subtasks rel-list">${list.map((x) => relRow(x)).join('')}</ul>`,
+                  )
+                  .join('')
+              : '<p class="muted">No linked tickets.</p>'
+            : loading
+        }
+      </section>
 
       <section class="drawer-section">
         <h3 class="pixel">COMMENTS ${d ? `<small>${d.commentsTotal}</small>` : ''}</h3>
@@ -2404,11 +2564,21 @@ async function uploadFiles(files, insertInto = null) {
   if (dz?.it.key === key) await refreshDrawer();
 }
 
+// A server still running older code doesn't send every list; show empty ones rather than failing.
+function fillDetails(d) {
+  d.children ||= (d.subtasks || []).map((x) => ({ type: 'subtask', typeName: 'Sub-task', ...x }));
+  d.links ||= [];
+  d.comments ||= [];
+  d.attachments ||= [];
+  return d;
+}
+
 async function refreshDrawer() {
   if (!dz) return;
   const key = dz.it.key;
   try {
     const d = await api(`/issues/${encodeURIComponent(key)}?world=${enc(dz.ctx.pkey)}&team=${enc(dz.ctx.tid)}`);
+    fillDetails(d);
     if (dz?.it.key === key) {
       dz.d = d;
       paintDrawer();
@@ -2418,10 +2588,10 @@ async function refreshDrawer() {
   }
 }
 
-async function openDrawer(it, ctx) {
+async function openDrawer(it, ctx, trail = []) {
   if (!it) return;
   drawerKey = it.key;
-  dz = { it, ctx, d: null, editingDesc: false, descDraft: null, commentDraft: '' };
+  dz = { it, ctx, trail, d: null, editingDesc: false, descDraft: null, commentDraft: '' };
   $$('.ent.selected, .questlog li.selected').forEach((e) => e.classList.remove('selected'));
   document.querySelector(`.ent[data-key="${CSS.escape(it.key)}"]`)?.classList.add('selected');
   document.querySelector(`[data-open="${CSS.escape(it.key)}"]`)?.closest('li')?.classList.add('selected');
@@ -2432,6 +2602,7 @@ async function openDrawer(it, ctx) {
   $('[data-close]', drawer).focus();
   try {
     const d = await api(`/issues/${encodeURIComponent(it.key)}?world=${enc(ctx.pkey)}&team=${enc(ctx.tid)}`);
+    fillDetails(d);
     if (drawerKey === it.key && dz) {
       dz.d = d;
       paintDrawer();
