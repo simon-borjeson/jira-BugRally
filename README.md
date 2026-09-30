@@ -90,7 +90,7 @@ A web page can't borrow your existing Jira browser login directly (Atlassian blo
 2. **Permissions** → add **Jira API** → add the scopes `read:jira-work`, `write:jira-work` and `read:jira-user`.
    For the Kanban's Jira boards and drag-to-rank, also add these granular scopes (Jira Software doesn't accept the classic ones): `read:board-scope:jira-software`, `read:board-scope.admin:jira-software`, `write:issue:jira-software` and `read:project:jira`. Then tick *Ask for Jira Software permissions* on the Settings page and everyone signs in once more.
 3. **Authorization** → set the callback URL to `http://localhost:3000/auth/callback` (the Settings page shows the exact URL to copy).
-4. **Settings** → copy the Client ID and Secret into Bug Rally's Settings page, choose *Sign in with Atlassian*, enter your Jira address (for example `https://volvocars.atlassian.net`) and press **Save**.
+4. **Settings** → copy the Client ID and Secret into Bug Rally's Settings page, choose *Sign in with Atlassian*, enter your Jira address (for example `https://yourpage.atlassian.net`) and press **Save**.
 5. Press **Sign in with Atlassian**.
 
 Notes:
