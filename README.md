@@ -50,6 +50,15 @@ Every team page has two views: **🏁 Stages** (the race track per feature) and 
 - **Existing tasks and bugs → a stage:** in a stage, press **🔗 Link existing** and search Jira. Or open an issue and pick another feature under *Stage (feature)*. Both set the issue's parent in Jira.
 - **Existing features → a team page:** on a team page, press **🔗 Link existing feature**, or open **⚙ Team settings**. You can link epics from other projects and hide epics you don't want as stages. A linked feature always shows all of its issues and full progress, even ones outside the team's filter. This is saved in Bug Rally only (`data/settings.json`) and doesn't change Jira.
 
+### Off-board work
+
+Finds unfinished work that boards miss, often tickets with a missing or wrong label, component or team:
+
+- **On each board's page (Stages, and a 👥 button on the Kanban):** *Our people's other tickets* lists tickets in the project assigned to this board's people that this board doesn't show. A board's people are worked out automatically: the assignees of its not-started tickets (Jira status category *To Do*).
+- **On the project page:** *Not on any board* lists everything in the project that none of the shown boards include. Boards whose filter is just the whole project (`project = KEY`) don't count here, since nothing would ever be outside them; the tile says which ones were left out.
+
+Each one shows a count and opens like a team page, with Stages and Kanban, so you can move tickets into features or fix them in the details panel. Counts are kept for 5 minutes, and refreshed right away when you hide or show a board.
+
 ### Team pages
 
 Every Jira board of the project is a team page, automatically: the boards that live in the project, like Jira's own board list. Boards of other projects and personal boards (which Jira's API also returns when their filter includes the project) start out hidden. Boards Jira still lists but that can't be opened (deleted boards, boards without a filter or whose filter is gone or not shared with you) are left out. Hover a board card and press **Hide** to hide one you don't use; it moves to *Hidden boards* at the bottom of the project page, where **Show** brings it back. Hiding only changes Bug Rally. Open **⚙ Team settings** on one to set:
@@ -129,7 +138,7 @@ Tokens and client secrets are stored in `data/` on the computer running Bug Rall
 | Edit description / comment | Saves Jira wiki markup through the REST API; Jira shows it as normal rich text |
 | New project | Creates a company-managed Kanban software project with you as lead (API token only; needs Jira admin rights) |
 
-Limits: up to 200 epics per project are loaded; the *Not in any feature* stage shows up to 300 issues: all open ones plus those finished in the last 14 days. Sub-tasks don't appear on the track; you see them in their parent issue's details. Uploads are limited to 50 MB per file (`MAX_UPLOAD_MB` in `.env`).
+Limits: epics load 200 at a time per team page: unfinished ones first (by Rank), then the most recently finished; press **Load 200 more features** to load the next 200, as often as needed; the *Not in any feature* stage shows up to 300 issues: all open ones plus those finished in the last 14 days. Sub-tasks don't appear on the track; you see them in their parent issue's details. Uploads are limited to 50 MB per file (`MAX_UPLOAD_MB` in `.env`).
 
 ## Project layout
 

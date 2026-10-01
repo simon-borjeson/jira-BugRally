@@ -387,6 +387,13 @@ svg {
 .team-card .team-stats {
   margin-top: auto;
 }
+.more-features {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 0;
+}
 .level-card.clear {
   background: linear-gradient(180deg, var(--panel) 0, #1e3b3a 100%);
 }
@@ -2210,6 +2217,34 @@ code {
   right: 14px;
   top: 16px;
   opacity: 0.9;
+}
+.section-title {
+  margin: 34px 0 6px;
+  font-size: 13px;
+  color: var(--gold);
+}
+.section-intro {
+  margin: 0 0 14px;
+  max-width: 900px;
+}
+.off-card {
+  min-height: 150px;
+  border-left: 4px solid var(--orange, #ef7d57);
+}
+.off-card.clean {
+  border-left-color: var(--green);
+  opacity: 0.75;
+}
+.off-count {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.off-n {
+  font: 700 22px var(--sans);
+  color: #ffb08f;
+  margin-right: 4px;
 }
 .team-wrap {
   position: relative;

@@ -66,6 +66,7 @@ const state = {
   projects: null,
   boards: {}, // "projectKey/teamId" -> board
   teams: {}, // projectKey -> { project, teams }
+  featureLimit: {}, // "projectKey/teamId" -> how many features to load (200, 400, …)
   kanbanFocus: {}, // "projectKey/teamId" -> feature key highlighted on the Kanban ('_none' = no feature)
   heroX: {}, // featureKey -> last hero x (so the hero walks from where he was)
   lastPct: {}, // featureKey -> last progress %
@@ -75,6 +76,10 @@ const state = {
 
 const UNSORTED = '_bonus';
 const ALL_TEAM = '_all';
+const OFFBOARD_TEAM = '_offboard';
+// Pages Bug Rally makes by itself (no settings): whole project, and the off-board pages.
+const isAuto = (tid) => tid === ALL_TEAM || tid === OFFBOARD_TEAM || /^o\d+$/.test(tid);
+const pageTag = (tid) => (tid === ALL_TEAM ? 'WHOLE PROJECT' : isAuto(tid) ? 'OFF-BOARD WORK' : 'TEAM');
 
 /* =========================================================
    Sound (tiny WebAudio blips, off by default)
@@ -439,7 +444,8 @@ async function loadBoard(pkey, tid, force = false) {
     // Issues are shared between a project's team pages, so drop their cached boards too.
     for (const other of Object.keys(state.boards)) if (other.startsWith(`${pkey}/`)) delete state.boards[other];
   }
-  if (!state.boards[k]) state.boards[k] = await api(`/projects/${enc(pkey)}/teams/${enc(tid)}/board`);
+  const features = state.featureLimit[k] || 200;
+  if (!state.boards[k]) state.boards[k] = await api(`/projects/${enc(pkey)}/teams/${enc(tid)}/board?features=${features}`);
   return state.boards[k];
 }
 
@@ -626,6 +632,29 @@ function createProjectForm() {
   });
 }
 
+// Off-board count for one board: its people's tickets that aren't on it. Fills [data-off="board"].
+async function loadBoardOff(pkey, boardId) {
+  const el = () => document.querySelector('.off-count[data-off="board"]');
+  try {
+    const r = await api(`/projects/${enc(pkey)}/offboard/${enc(boardId)}`);
+    const link = document.querySelector('#kb-off b');
+    if (link) link.textContent = r.count == null ? '?' : String(r.count);
+    const target = el();
+    if (!target) return;
+    const ppl = r.people.length
+      ? `<small class="muted off-people" title="${esc(r.people.join(', '))}">${r.people.length} ${r.people.length === 1 ? 'person' : 'people'}: ${esc(r.people.slice(0, 3).join(', '))}${r.people.length > 3 ? ` +${r.people.length - 3}` : ''}</small>`
+      : '<small class="muted off-people">No one is assigned to its not-started tickets yet</small>';
+    const n = r.count;
+    target.innerHTML = `${
+      !r.people.length ? '' : n == null ? '<span class="muted">Couldn’t count</span>' : n === 0 ? '<span class="ok-text">✓ Nothing off-board</span>' : `<span><b class="off-n">${n}</b> unfinished</span>`
+    }${ppl}`;
+    target.closest('.off-card')?.classList.toggle('clean', !r.people.length || n === 0);
+  } catch (e) {
+    const target = el();
+    if (target) target.innerHTML = `<span class="form-error small-text">${esc(e.message)}</span>`;
+  }
+}
+
 // Small line saying which server code is running, and a warning when it needs a restart.
 function serverLine() {
   const sv = state.status?.server;
@@ -687,6 +716,21 @@ async function renderProject(pkey) {
         </a>
       </div>
       ${
+        teams.length
+          ? `<h2 class="pixel section-title">OFF-BOARD WORK</h2>
+      <p class="muted small-text section-intro">Unfinished tasks, stories and bugs in ${esc(pkey)} that none of the boards above show, often tickets with a missing or wrong label, component or team.
+        Each board also has its own off-board tile (its people's tickets that aren't on that board) on its page.</p>
+      <div class="grid teams off-grid">
+        <a class="card team-card off-card" href="${teamHref(pkey, OFFBOARD_TEAM)}" data-search="not on any board off-board">
+          <span class="pixel tag">WHOLE PROJECT</span>
+          <h2>Not on any board</h2>
+          <span class="muted small-text off-note">Everything in ${esc(pkey)} that no board shows.</span>
+          <span class="off-count" data-off="_project">Counting…</span>
+        </a>
+      </div>`
+          : ''
+      }
+      ${
         hiddenBoards.length || brokenBoards.length
           ? `<details class="finished-section" id="hidden-boards">
                <summary><span class="pixel">HIDDEN BOARDS</span> <span class="count">${hiddenBoards.length + brokenBoards.length}</span>
@@ -724,7 +768,7 @@ async function renderProject(pkey) {
   const applyBoardFilter = (q) => {
     const words = q.toLowerCase().split(/\s+/).filter(Boolean);
     let shown = 0;
-    $$('.team-wrap[data-search]').forEach((c) => {
+    $$('.team-wrap[data-search], .off-card[data-search]').forEach((c) => {
       const hit = words.every((w) => c.dataset.search.includes(w));
       c.hidden = !hit;
       if (hit) shown += 1;
@@ -751,6 +795,30 @@ async function renderProject(pkey) {
     applyBoardFilter(e.target.value);
   });
   applyBoardFilter(boardFilter);
+
+  // Off-board counts, in the background.
+  if (teams.length) {
+    const fill = (id, html, clean = false) => {
+      const el = document.querySelector(`.off-count[data-off="${CSS.escape(id)}"]`);
+      if (!el) return;
+      el.innerHTML = html;
+      el.closest('.off-card')?.classList.toggle('clean', clean);
+    };
+    const countHtml = (n) =>
+      n == null ? '<span class="muted">Couldn’t count</span>' : n === 0 ? '<span class="ok-text">✓ Nothing off-board</span>' : `<span><b class="off-n">${n}</b> unfinished</span>`;
+    api(`/projects/${enc(pkey)}/offboard`)
+      .then((r) => {
+        fill('_project', countHtml(r.count), r.count === 0);
+        if (r.ignored?.length) {
+          const note = $('.off-card .off-note');
+          if (note)
+            note.textContent = `Everything in ${pkey} that no board shows. Not counted as boards, because they show the whole project: ${r.ignored.join(', ')}.`;
+        }
+      })
+      .catch((e) => {
+        $$('.off-count').forEach((el) => (el.innerHTML = `<span class="form-error small-text">${esc(e.message)}</span>`));
+      });
+  }
 
   // Fill in each team's progress in the background.
   for (const t of teams) {
@@ -829,13 +897,22 @@ async function renderTeam(pkey, tid) {
   const openCards = order.open.map((f, i) => card(statsOf(f), i)).join('');
   const finishedCards = order.finished.map((f, i) => card(statsOf(f), i)).join('');
   const foldKey = `bq.finishedOpen.${pkey}/${tid}`;
+  // Features load 200 at a time: unfinished first (by rank), then the most recently finished.
+  const moreFeatures = board.featuresCapped
+    ? `<div class="more-features">
+         <p class="muted small-text">Showing ${board.maxFeatures} features: ${
+           board.openCapped ? 'the top-ranked unfinished ones. More unfinished features aren’t loaded yet.' : 'all unfinished ones, then the most recently finished. Older finished features aren’t loaded yet.'
+         }</p>
+         <button class="btn" type="button" id="more-features">Load 200 more features</button>
+       </div>`
+    : '';
   const finishedOpen = store.get(foldKey, true);
 
   app.innerHTML = `
     <section class="screen">
       <div class="screen-head">
         <div>
-          <span class="pixel tag">${tid === ALL_TEAM ? 'WHOLE PROJECT' : 'TEAM'} · ${esc(project.name)}</span>
+          <span class="pixel tag">${pageTag(tid)} · ${esc(project.name)}</span>
           <h1>${esc(tid === ALL_TEAM ? project.name : team.name)}</h1>
           <span class="key filter-line" title="${esc(filterSummary(team, pkey))}">⛃ ${esc(filterSummary(team, pkey))}</span>
           ${project.url ? ` · <a class="ext" href="${esc(project.url)}" target="_blank" rel="noopener">Open in Jira ↗</a>` : ''}
@@ -843,8 +920,8 @@ async function renderTeam(pkey, tid) {
         </div>
         <div class="actions">
           <button class="btn primary" id="new-feature" type="button">+ New feature</button>
-          ${tid === ALL_TEAM ? '' : '<button class="btn" id="link-feature" type="button">🔗 Link existing feature</button>'}
-          ${tid === ALL_TEAM ? '' : `<a class="btn" href="${teamHref(pkey, tid, '/settings')}">⚙ Team settings</a>`}
+          ${isAuto(tid) ? '' : '<button class="btn" id="link-feature" type="button">🔗 Link existing feature</button>'}
+          ${isAuto(tid) ? '' : `<a class="btn" href="${teamHref(pkey, tid, '/settings')}">⚙ Team settings</a>`}
           <button class="btn" id="refresh" type="button" title="Reload from Jira">↻</button>
         </div>
       </div>
@@ -857,11 +934,22 @@ async function renderTeam(pkey, tid) {
       <div class="grid levels">
         ${openCards}
         ${bonus}
+        ${
+          team.boardId
+            ? `<a class="card level-card off-card" href="${teamHref(pkey, `o${team.boardId}`)}" id="board-off">
+                 <div class="level-top"><span class="pixel tag">OFF-BOARD WORK</span></div>
+                 <h2>Our people's other tickets</h2>
+                 <span class="key">Assigned to this board's people, but not on this board</span>
+                 <span class="off-count" data-off="board">Counting…</span>
+               </a>`
+            : ''
+        }
         <button class="card level-card add-card" id="new-feature-2" type="button">
           <span class="plus pixel">+</span><span>New feature</span>
         </button>
       </div>
       ${levels.length === 0 ? '<p class="muted center">No features (epics) yet. Create one, or link an existing one from Jira.</p>' : ''}
+      ${board.openCapped ? moreFeatures : ''}
       ${
         order.finished.length
           ? `<details class="finished-section" id="finished-section" ${finishedOpen ? 'open' : ''}>
@@ -871,6 +959,7 @@ async function renderTeam(pkey, tid) {
              </details>`
           : ''
       }
+      ${board.featuresCapped && !board.openCapped ? moreFeatures : ''}
       ${
         board.hiddenFeatures?.length
           ? `<p class="muted center">${board.hiddenFeatures.length} hidden feature${board.hiddenFeatures.length > 1 ? 's' : ''}. <a href="${teamHref(pkey, tid, '/settings')}">Manage in Team settings</a></p>`
@@ -901,6 +990,23 @@ async function renderTeam(pkey, tid) {
         location.hash = teamHref(pkey, tid, `/f/${enc(key)}`);
       },
     });
+  if (team.boardId) loadBoardOff(pkey, team.boardId);
+  $('#more-features')?.addEventListener('click', async (e) => {
+    const k = `${pkey}/${tid}`;
+    e.target.disabled = true;
+    e.target.textContent = 'Loading…';
+    state.featureLimit[k] = (board.maxFeatures || 200) + 200;
+    delete state.boards[k];
+    try {
+      await loadBoard(pkey, tid);
+      renderTeam(pkey, tid);
+    } catch (err) {
+      state.featureLimit[k] = board.maxFeatures || 200;
+      toast(err.message, 'error');
+      e.target.disabled = false;
+      e.target.textContent = 'Load 200 more features';
+    }
+  });
   $('#new-feature').addEventListener('click', newFeature);
   $('#new-feature-2').addEventListener('click', newFeature);
   $('#finished-section')?.addEventListener('toggle', (e) => {
@@ -957,6 +1063,12 @@ function stageOrder(features) {
 function filterSummary(world, pkey) {
   const f = world?.filter;
   if (f?.mode === 'board') return `Jira board: ${world.name}`;
+  if (world?.special === 'offboard')
+    return `Unfinished work in ${pkey} that none of its ${world.boardCount ?? ''} boards show${world.ignored?.length ? ` (not counting the whole-project boards ${world.ignored.join(', ')})` : ''}`;
+  if (world?.special === 'people')
+    return `Tickets in ${pkey} assigned to ${world.boardName}'s ${world.people?.length || 0} people (assignees of its not-started tickets) that aren't on that board${
+      world.people?.length ? `: ${world.people.map((p) => p.name).join(', ')}` : ''
+    }`;
   if (!f || f.mode === 'project') return `Whole project ${pkey}`;
   if (f.mode === 'saved') return `Saved filter: ${f.filterName || f.filterId}`;
   return `JQL: ${f.jql}`;
@@ -1164,7 +1276,7 @@ async function renderKanban(pkey, tid) {
   const [board, kb, boards] = await Promise.all([
     loadBoard(pkey, tid),
     api(`/projects/${enc(pkey)}/teams/${enc(tid)}/kanban`),
-    tid === ALL_TEAM ? api(`/projects/${enc(pkey)}/boards`).catch((e) => ({ error: e.message })) : [],
+    isAuto(tid) ? api(`/projects/${enc(pkey)}/boards`).catch((e) => ({ error: e.message })) : [],
   ]);
   const boardsError = Array.isArray(boards) ? null : boards.error;
   const boardList = Array.isArray(boards) ? boards : [];
@@ -1279,7 +1391,7 @@ async function renderKanban(pkey, tid) {
     <section class="screen kanban">
       <div class="screen-head">
         <div>
-          <span class="pixel tag">${tid === ALL_TEAM ? 'WHOLE PROJECT' : 'TEAM'} · ${esc(project.name)}</span>
+          <span class="pixel tag">${pageTag(tid)} · ${esc(project.name)}</span>
           <h1>${esc(tid === ALL_TEAM ? project.name : team.name)}</h1>
           <span class="key filter-line" title="${esc(filterSummary(team, pkey))}">⛃ ${esc(filterSummary(team, pkey))}</span>
           ${teamDefaultsChips(team)}
@@ -1296,6 +1408,7 @@ async function renderKanban(pkey, tid) {
         ${
           team.boardId
             ? `<span class="small-text">Columns from the Jira board <b>${esc(team.name)}</b>. Change them on the board in Jira.</span>
+               <a class="btn small" id="kb-off" href="${teamHref(pkey, `o${team.boardId}`)}" title="Tickets assigned to this board's people that aren't on this board">👥 Off-board work <b>…</b></a>
                ${kb.layoutError ? `<span class="form-error small-text">${esc(kb.layoutError)}</span>` : ''}`
             : `
         <label class="layout-pick">Columns
@@ -1377,6 +1490,7 @@ async function renderKanban(pkey, tid) {
 
   const kboard = $('#kboard');
   fitKanban();
+  if (team.boardId) loadBoardOff(pkey, team.boardId);
 
   // Highlight the cards of the chosen feature; everything else fades.
   const applyFocus = () => {
@@ -1691,7 +1805,7 @@ async function renderKanban(pkey, tid) {
    Screen 2b: world settings
    ========================================================= */
 async function renderTeamSettings(pkey, tid) {
-  if (tid === ALL_TEAM) {
+  if (isAuto(tid)) {
     location.replace(teamHref(pkey, tid));
     return;
   }

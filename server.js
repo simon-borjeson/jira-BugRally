@@ -343,6 +343,87 @@ const teamOf = (pk, id) => {
   if (!team) throw bad('That team page no longer exists.', 404);
   return team;
 };
+// The project's boards as the project page shows them (hidden ones and boards from elsewhere left out).
+const isBoardHidden = (key) => {
+  const hidden = new Set(settings.getHiddenBoards(key));
+  const shown = new Set(settings.getShownBoards(key));
+  return (b) => hidden.has(b.id) || (b.elsewhere && !shown.has(b.id));
+};
+async function visibleBoards(backend, key) {
+  const hiddenFn = isBoardHidden(key);
+  return (await backend.listBoards(key)).filter((b) => !b.broken && !hiddenFn(b));
+}
+
+// Off-board work. Cached for 5 minutes per sign-in.
+const offboardCache = new Map();
+const cacheKey = (req, ...parts) => [cookies(req).bq_sid || 'shared', ...parts].join('|');
+const cached = async (ck, make) => {
+  const hit = offboardCache.get(ck);
+  if (hit && Date.now() - hit.at < 5 * 60000) return hit.value;
+  const value = await make();
+  offboardCache.set(ck, { value, at: Date.now() });
+  return value;
+};
+// A board whose filter is just the whole project ("project = KEY") shows everything, so nothing would ever be
+// "off-board". Those boards are left out of the project's "Not on any board" check.
+const isCatchAll = (jql, key) =>
+  new RegExp(`^\\s*project\\s*(=|in)\\s*\\(?\\s*"?${key}"?\\s*\\)?\\s*$`, 'i').test(String(jql || '').trim());
+
+// Project: unfinished work that none of the project's shown boards (except catch-all ones) include.
+async function offboardInfo(req, backend, key) {
+  return cached(cacheKey(req, key, 'project'), async () => {
+    const boards = await visibleBoards(backend, key);
+    const withJql = await Promise.all(
+      boards.map(async (b) => {
+        try {
+          return { ...b, jql: await backend.boardJql(b.id) };
+        } catch (e) {
+          throw Object.assign(new Error(`Board “${b.name}” couldn't be read, so off-board work can't be worked out: ${e.message}`), { status: 502 });
+        }
+      }),
+    );
+    const real = withJql.filter((b) => !isCatchAll(b.jql, key));
+    const notOnAny = real.length ? ` AND NOT (${real.map((b) => `(${b.jql})`).join(' OR ')})` : '';
+    return {
+      projectJql: `project = "${key}"${notOnAny}`,
+      boardCount: real.length,
+      ignored: withJql.filter((b) => isCatchAll(b.jql, key)).map((b) => b.name),
+    };
+  });
+}
+// One board: tickets in the project assigned to the board's people (assignees of its not-started tickets)
+// that this board doesn't show.
+async function boardOffInfo(req, backend, key, boardId) {
+  return cached(cacheKey(req, key, 'board', boardId), async () => {
+    const [jql, people] = await Promise.all([backend.boardJql(boardId), backend.boardPeople(boardId)]);
+    const ids = people.map((p) => `"${String(p.id).replace(/"/g, '')}"`).join(',');
+    return {
+      people,
+      jql: people.length ? `project = "${key}" AND assignee in (${ids}) AND NOT (${jql})` : null,
+    };
+  });
+}
+const clearOffboard = (key) => {
+  for (const k of offboardCache.keys()) if (k.split('|')[1] === key) offboardCache.delete(k);
+};
+// Counts are of tasks, stories and bugs, like the lists on the page; features (epics) are stages, not items.
+const OPEN_ITEMS = ' AND statusCategory != Done AND issuetype in standardIssueTypes() AND issuetype != Epic';
+
+// For the automatic off-board pages: the team with its filter filled in.
+async function resolveTeam(req, backend, key, team) {
+  if (!team.special) return team;
+  if (team.special === 'offboard') {
+    const info = await offboardInfo(req, backend, key);
+    return { ...team, filter: { mode: 'jql', jql: info.projectJql, applyToItems: true }, boardCount: info.boardCount, ignored: info.ignored };
+  }
+  const info = await boardOffInfo(req, backend, key, team.peopleOf);
+  // No people → match nothing.
+  const jql = info.jql || `project = "${key}" AND created < "1971-01-01"`;
+  return { ...team, people: info.people, filter: { mode: 'jql', jql, applyToItems: true } };
+}
+// What the browser gets: the team without the (long) generated JQL.
+const publicTeam = (t) => (t.special ? { ...t, filter: { mode: 'auto' } } : t);
+
 // Team + project, from a request body/query that names them. Used to apply a team's defaults.
 const teamFrom = (src) => (src?.worldKey && src?.teamId ? { pk: projectKey(src.worldKey), team: teamOf(projectKey(src.worldKey), src.teamId) } : null);
 
@@ -361,9 +442,8 @@ app.get(
     const list = boards.list || [];
     const usable = list.filter((b) => !b.broken);
     const hidden = new Set(settings.getHiddenBoards(key));
-    const shown = new Set(settings.getShownBoards(key));
     // Hidden: hidden by you, or a board from elsewhere (other project, personal) you haven't chosen to show.
-    const isHidden = (b) => hidden.has(b.id) || (b.elsewhere && !shown.has(b.id));
+    const isHidden = isBoardHidden(key);
     return {
       project,
       teams: settings.boardTeams(key, usable.filter((b) => !isHidden(b))),
@@ -377,6 +457,30 @@ app.get(
   }),
 );
 
+// Off-board counts: the project tile, and one board (from inside its team page).
+app.get(
+  '/api/projects/:key/offboard',
+  wrap(async (req) => {
+    const key = projectKey(req.params.key);
+    const backend = be(req);
+    if (req.query.refresh) clearOffboard(key);
+    const info = await offboardInfo(req, backend, key);
+    const count = await backend.countIssues(`${info.projectJql}${OPEN_ITEMS}`).catch(() => null);
+    return { count, boards: info.boardCount, ignored: info.ignored };
+  }),
+);
+app.get(
+  '/api/projects/:key/offboard/:board',
+  wrap(async (req) => {
+    const key = projectKey(req.params.key);
+    const boardId = String(req.params.board).replace(/\D/g, '');
+    const backend = be(req);
+    const info = await boardOffInfo(req, backend, key, boardId);
+    const count = info.jql ? await backend.countIssues(`${info.jql}${OPEN_ITEMS}`).catch(() => null) : 0;
+    return { count, people: info.people.map((p) => p.name) };
+  }),
+);
+
 // Hide or show a board on the project page. Only saved in Bug Rally.
 app.put(
   '/api/projects/:key/hidden-boards',
@@ -384,6 +488,7 @@ app.put(
     be(req);
     const boardId = String(req.body?.boardId || '').replace(/\D/g, '').slice(0, 20);
     if (!boardId) throw bad('Which board?');
+    clearOffboard(projectKey(req.params.key));
     return { hiddenBoards: settings.setBoardHidden(projectKey(req.params.key), boardId, Boolean(req.body?.hidden)) };
   }),
 );
@@ -398,7 +503,7 @@ app.put(
     be(req);
     const key = projectKey(req.params.key);
     const id = req.params.team;
-    if (id === ALL_TEAM) throw bad('The whole-project view has no settings. Open one of the boards instead.');
+    if (id === ALL_TEAM || settings.getTeam(key, id)?.special) throw bad('This page is automatic and has no settings. Open one of the boards instead.');
     teamOf(key, id);
     const body = req.body || {};
     const patch = {};
@@ -420,19 +525,25 @@ app.get(
   '/api/projects/:key/teams/:team/board',
   wrap(async (req) => {
     const key = projectKey(req.params.key);
-    const team = teamOf(key, req.params.team);
     const backend = be(req);
-    const [board, bugTypeName] = await Promise.all([backend.board(key, team), backend.bugTypeName(key, team.defaults.bugType)]);
-    return { ...board, team, bugTypeName };
+    const team = await resolveTeam(req, backend, key, teamOf(key, req.params.team));
+    // ?features=400 loads more features (200 at a time).
+    const maxFeatures = Math.min(10000, Math.max(200, Math.ceil((Number(req.query.features) || 200) / 200) * 200));
+    const [board, bugTypeName] = await Promise.all([
+      backend.board(key, team, { maxFeatures }),
+      backend.bugTypeName(key, team.defaults.bugType),
+    ]);
+    return { ...board, team: publicTeam(team), bugTypeName };
   }),
 );
 
 app.get(
   '/api/projects/:key/teams/:team/kanban',
-  wrap((req) => {
+  wrap(async (req) => {
     const key = projectKey(req.params.key);
-    const team = teamOf(key, req.params.team);
-    return be(req).kanban(key, team, settings.getKanbanLayout(key, team.id));
+    const backend = be(req);
+    const team = await resolveTeam(req, backend, key, teamOf(key, req.params.team));
+    return backend.kanban(key, team, settings.getKanbanLayout(key, team.id));
   }),
 );
 
