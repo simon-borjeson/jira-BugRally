@@ -380,6 +380,13 @@ svg {
     #3a3f55;
 }
 
+/* Progress bar and counts sit at the bottom of every card, however long the title is. */
+.level-card > .key {
+  margin-bottom: auto;
+}
+.team-card .team-stats {
+  margin-top: auto;
+}
 .level-card.clear {
   background: linear-gradient(180deg, var(--panel) 0, #1e3b3a 100%);
 }
@@ -1062,8 +1069,8 @@ svg {
   padding: 0;
 }
 .questlog li {
-  display: grid;
-  grid-template-columns: auto auto auto 1fr auto auto;
+  /* Flex, not a fixed grid: rows can have a due badge, a move menu, a Jira link or not. */
+  display: flex;
   align-items: center;
   gap: 10px;
   padding: 8px 4px;
@@ -1072,6 +1079,30 @@ svg {
 }
 .questlog li:last-child {
   border-bottom: 0;
+}
+.questlog li > * {
+  flex: 0 0 auto;
+}
+.questlog li {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+/* The title keeps a readable width; the move menu, due badge and status wrap below it when space runs out. */
+.questlog li > .q-sum {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-wrap: break-word;
+  text-align: left;
+}
+.questlog li > .row-move,
+.questlog li > .due-badge,
+.questlog li > .q-status {
+  margin-left: auto;
+}
+.questlog li > .row-move ~ .due-badge,
+.questlog li > .row-move ~ .q-status,
+.questlog li > .due-badge ~ .q-status {
+  margin-left: 0;
 }
 .questlog li.done .q-sum {
   text-decoration: line-through;
@@ -2180,6 +2211,53 @@ code {
   top: 16px;
   opacity: 0.9;
 }
+.team-wrap {
+  position: relative;
+  display: grid;
+}
+.card-hide {
+  position: absolute;
+  right: 12px;
+  top: 44px;
+  z-index: 2;
+  padding: 2px 8px;
+  font: 600 11px var(--sans);
+  color: var(--muted);
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.team-wrap:hover .card-hide,
+.card-hide:focus-visible {
+  opacity: 1;
+}
+.card-hide:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+@media (hover: none) {
+  .card-hide {
+    opacity: 1;
+  }
+}
+.hidden-boards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.hidden-boards li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.hidden-boards .q-sum {
+  flex: 1;
+}
 .team-card .minibar {
   margin: 8px 0 0;
   height: 10px;
@@ -2211,9 +2289,6 @@ code {
   font-size: 11px;
   color: var(--muted);
   text-decoration: none;
-}
-.questlog li.with-move {
-  grid-template-columns: auto auto auto 1fr auto auto auto;
 }
 .row-move {
   max-width: 150px;
@@ -2869,14 +2944,11 @@ code {
     grid-template-columns: 1fr;
   }
   .questlog li {
-    grid-template-columns: auto auto 1fr auto;
+    flex-wrap: wrap;
   }
   .questlog .q-key,
   .questlog .q-status {
     display: none;
-  }
-  .questlog li.with-move {
-    grid-template-columns: auto auto 1fr auto auto;
   }
   .kanban-wrap {
     flex-direction: column;

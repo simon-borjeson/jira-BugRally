@@ -5,7 +5,7 @@ A Jira front-end that shows progress as a race. It is not a game you play: it is
 - **Project = Circuit.** The start screen lists your Jira projects.
 - **Team = Jira board.** Inside a project you pick your team: every Jira board of the project is a team page. It shows the issues in the board's filter, and its Kanban uses the board's columns. Per team, Bug Rally fills in the team's work group, components and labels on everything the team creates. There is also a *Whole project* view with no filter.
 - **Feature (Epic) = Stage.** Each team page shows its stages with a progress bar. Unfinished stages come first, in Jira **Rank** order (top = highest); stages whose feature is marked done move to a **Finished stages** section, newest first, which you can collapse (Bug Rally remembers that per team page).
-- **On a stage** every issue under the epic sits on the track:
+- **On a stage** every issue under the epic sits on the track, in Jira **Rank** order (finished ones first on the track, last in the lists below it):
   - **Tasks** are red fuel cans, **stories** are blue ones. Mark one done and it becomes a green checkpoint flag.
   - **Bugs** (Bug, Defect or **Fault Report** issue types) are traffic cones blocking the road. Mark one done and it gets knocked over.
   - The car drives up to the next open item, so how far it has come is your progress.
@@ -52,7 +52,7 @@ Every team page has two views: **🏁 Stages** (the race track per feature) and 
 
 ### Team pages
 
-Every Jira board of the project is a team page, automatically. Open **⚙ Team settings** on one to set:
+Every Jira board of the project is a team page, automatically: the boards that live in the project, like Jira's own board list. Boards of other projects and personal boards (which Jira's API also returns when their filter includes the project) start out hidden. Boards Jira still lists but that can't be opened (deleted boards, boards without a filter or whose filter is gone or not shared with you) are left out. Hover a board card and press **Hide** to hide one you don't use; it moves to *Hidden boards* at the bottom of the project page, where **Show** brings it back. Hiding only changes Bug Rally. Open **⚙ Team settings** on one to set:
 
 - **Also filter the tasks and bugs inside each feature:** on by default. Untick it to show every issue in the team's features, even ones not on the board.
 - **Issue type for bugs:** what **+ Bug** creates. *Automatic* uses **Fault Report** when the project has it, otherwise Bug. The button and lists use that name.

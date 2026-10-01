@@ -159,7 +159,8 @@ drawer.addEventListener('click', (e) => {
   // Child items and related tickets open their own details; ← goes back.
   const go = e.target.closest('[data-drawer-open]');
   if (go && dz?.d) {
-    const all = [...(dz.d.children || []), ...(dz.d.links || []).map((l) => l.issue)];
+    const stageItems = dz.ctx.board?.features?.find((f) => f.key === dz.it.key)?.items || [];
+    const all = [...(dz.d.children || []), ...stageItems, ...(dz.d.links || []).map((l) => l.issue)];
     const next = all.find((x) => x.key === go.dataset.drawerOpen);
     if (next) openDrawer(next, dz.ctx, [...dz.trail, dz.it]);
     return;
@@ -625,25 +626,38 @@ function createProjectForm() {
   });
 }
 
+// Small line saying which server code is running, and a warning when it needs a restart.
+function serverLine() {
+  const sv = state.status?.server;
+  if (!sv) return '<p class="form-error center small-text">The Bug Rally server is running old code. Restart it: press Ctrl+C where it runs, then <code>npm start</code>.</p>';
+  const stale = sv.codeChangedAt > sv.startedAt;
+  return stale
+    ? `<p class="form-error center small-text">Bug Rally's code changed (${esc(fmtDate(sv.codeChangedAt, true))}) after the server started (${esc(fmtDate(sv.startedAt, true))}). Restart it: press Ctrl+C where it runs, then <code>npm start</code>.</p>`
+    : `<p class="muted center small-text">Server started ${esc(fmtDate(sv.startedAt, true))} · running from ${esc(sv.folder)}</p>`;
+}
+
 /* =========================================================
    Screen 1b: team pages of a project (one per Jira board)
    ========================================================= */
 async function renderProject(pkey) {
   if (!state.teams[pkey]) loadingScreen('LOADING CIRCUIT');
-  const { project, teams, boardsError } = await loadTeams(pkey);
+  const { project, teams, boardsError, hiddenBoards = [], brokenBoards = [] } = await loadTeams(pkey);
   setCrumbs([{ label: 'Circuits', href: '#/' }, { label: project.name }]);
   const filterKey = `bq.boardFilter.${pkey}`;
   const boardFilter = store.get(filterKey, '');
 
   const teamCard = (t) => `
-    <a class="card team-card" href="${teamHref(pkey, t.id)}" data-search="${esc(`${t.name} ${t.boardType || ''} ${t.boardId || ''}`.toLowerCase())}">
+    <div class="team-wrap" data-search="${esc(`${t.name} ${t.boardType || ''} ${t.boardId || ''}`.toLowerCase())}">
+    <button type="button" class="card-hide" data-hide-board="${esc(t.boardId)}" title="Hide this board in Bug Rally (Jira isn't changed)" aria-label="Hide ${esc(t.name)}">Hide</button>
+    <a class="card team-card" href="${teamHref(pkey, t.id)}">
       <span class="pixel tag">${t.boardType ? `${esc(t.boardType.toUpperCase())} ` : ''}BOARD</span>
       <h2>${esc(t.name)}</h2>
       <span class="key filter-line">⛃ Board filter and columns from Jira</span>
       ${teamDefaultsChips(t) || '<span class="muted small-text">Nothing filled in automatically</span>'}
       <div class="team-stats muted small-text" data-team="${esc(t.id)}">Loading stages…</div>
       <span class="team-car" aria-hidden="true">${SPRITES.carSmall}</span>
-    </a>`;
+    </a>
+    </div>`;
 
   app.innerHTML = `
     <section class="screen">
@@ -673,19 +687,44 @@ async function renderProject(pkey) {
         </a>
       </div>
       ${
+        hiddenBoards.length || brokenBoards.length
+          ? `<details class="finished-section" id="hidden-boards">
+               <summary><span class="pixel">HIDDEN BOARDS</span> <span class="count">${hiddenBoards.length + brokenBoards.length}</span>
+                 <span class="muted small-text">Boards hidden by you, and boards that can't be opened</span></summary>
+               <ul class="hidden-boards">
+                 ${hiddenBoards
+                   .map(
+                     (b) => `<li><span class="q-sum">${esc(b.name)}</span><span class="q-status">${esc(b.reason || 'hidden by you')}</span>
+                       <button type="button" class="btn small" data-show-board="${esc(b.id)}">Show</button></li>`,
+                   )
+                   .join('')}
+                 ${brokenBoards
+                   .map(
+                     (b) => `<li class="muted"><span class="q-sum">${esc(b.name)}</span><span class="q-status">left out: ${esc(b.reason)}</span></li>`,
+                   )
+                   .join('')}
+               </ul>
+               <p class="muted small-text">Only boards that live in ${esc(pkey)} are shown, like in Jira. Boards of other projects and personal boards
+               that Jira lists because their filter includes ${esc(pkey)} are hidden; press <b>Show</b> to use one anyway.
+               ${brokenBoards.length ? 'Boards that can’t be opened (deleted, or their filter is gone) are always left out.' : ''}</p>
+             </details>`
+          : ''
+      }
+      ${
         boardsError
           ? `<p class="form-error center">Jira boards couldn't be listed (${esc(boardsError)}). Teams come from the project's boards, so Bug Rally needs the Jira Software permissions (see <a href="#/settings">Settings</a>).</p>`
           : teams.length === 0
             ? '<p class="muted center">This project has no Jira boards yet. Create a board in Jira and it shows up here as a team.</p>'
             : ''
       }
+      ${serverLine()}
     </section>`;
 
   // Filter the boards by name; Whole project always stays.
   const applyBoardFilter = (q) => {
     const words = q.toLowerCase().split(/\s+/).filter(Boolean);
     let shown = 0;
-    $$('.team-card[data-search]').forEach((c) => {
+    $$('.team-wrap[data-search]').forEach((c) => {
       const hit = words.every((w) => c.dataset.search.includes(w));
       c.hidden = !hit;
       if (hit) shown += 1;
@@ -694,6 +733,19 @@ async function renderProject(pkey) {
     none.hidden = !words.length || shown > 0;
     none.textContent = `No boards match “${q}”.`;
   };
+  // Hide / show boards (saved in Bug Rally only).
+  const setHidden = async (boardId, hidden) => {
+    try {
+      await api(`/projects/${enc(pkey)}/hidden-boards`, { method: 'PUT', body: { boardId, hidden } });
+      await loadTeams(pkey, true);
+      toast(hidden ? 'Board hidden. Find it again under Hidden boards.' : 'Board shown again', 'success');
+      renderProject(pkey);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+  $$('[data-hide-board]').forEach((b) => b.addEventListener('click', () => setHidden(b.dataset.hideBoard, true)));
+  $$('[data-show-board]').forEach((b) => b.addEventListener('click', () => setHidden(b.dataset.showBoard, false)));
   $('#board-filter')?.addEventListener('input', (e) => {
     store.set(filterKey, e.target.value);
     applyBoardFilter(e.target.value);
@@ -1871,10 +1923,10 @@ const CAR_HALF = 56;
 const FIRST_X = 280;
 const GAP = 150;
 
+// On the track: finished items first (the car has passed them), then open ones. Both in Jira Rank order,
+// which is the order the server sends them in.
 function orderItems(items) {
-  const done = items.filter((i) => i.done).sort((a, b) => (a.doneAt || a.created).localeCompare(b.doneAt || b.created));
-  const open = items.filter((i) => !i.done).sort((a, b) => a.created.localeCompare(b.created));
-  return [...done, ...open];
+  return [...items.filter((i) => i.done), ...items.filter((i) => !i.done)];
 }
 
 // Deterministic pseudo-random so scenery doesn't jump around between renders.
@@ -1991,7 +2043,9 @@ async function renderLevel(pkey, tid, fkey) {
     </li>`;
   const tasks = feature.items.filter((i) => i.type !== 'bug');
   const bugs = feature.items.filter((i) => i.type === 'bug');
-  const byOpenFirst = (a, b) => a.done - b.done || a.created.localeCompare(b.created);
+  // Open items first, then finished ones; each in Jira Rank order (top = highest).
+  const rankPos = new Map(feature.items.map((x, i) => [x.key, i]));
+  const byOpenFirst = (a, b) => a.done - b.done || rankPos.get(a.key) - rankPos.get(b.key);
 
   app.innerHTML = `
     <section class="screen level">
@@ -2220,6 +2274,9 @@ function detailHtml() {
   const currentParent = d ? d.parent?.key || null : it.parentKey;
   const parentKnown = !currentParent || features.some((f) => f.key === currentParent);
   const site = state.status?.site;
+  // Child items from Jira; for a feature, fall back to the items Bug Rally already has for its stage.
+  const stageItems = isFeature ? ctx.board?.features?.find((f) => f.key === it.key)?.items || [] : [];
+  const children = d ? (d.children.length ? d.children : stageItems) : [];
 
   const description = dz.editingDesc
     ? `<div class="editor">
@@ -2297,12 +2354,13 @@ function detailHtml() {
 
       <section class="drawer-section">
         <h3 class="pixel">${isFeature ? 'CHILD ITEMS' : 'CHILD ITEMS · SUB-TASKS'} ${
-          d ? `<small>${d.children.filter((x) => x.done).length}/${d.children.length} done</small>` : ''
+          d ? `<small>${children.filter((x) => x.done).length}/${children.length} done</small>` : ''
         }</h3>
+        ${d?.childrenError ? `<p class="form-error small-text">Jira couldn't list the child items: ${esc(d.childrenError)}</p>` : ''}
         ${
           d
-            ? d.children.length
-              ? `<ul class="subtasks rel-list">${d.children.map((x) => relRow(x)).join('')}</ul>`
+            ? children.length
+              ? `<ul class="subtasks rel-list">${children.map((x) => relRow(x)).join('')}</ul>`
               : `<p class="muted">${isFeature ? 'No tasks, stories or bugs in this feature yet.' : 'No sub-tasks.'}</p>`
             : loading
         }

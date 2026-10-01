@@ -1,5 +1,6 @@
 import express from 'express';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './lib/env.js';
@@ -114,7 +115,23 @@ function be(req) {
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '2mb' }));
-app.use(express.static(path.join(root, 'public')));
+// Always check for a newer copy, so a reload picks up changes to the page.
+app.use(express.static(path.join(root, 'public'), { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
+
+// Which code is running: shown on the project page, so it's easy to see whether a restart is needed.
+const STARTED_AT = new Date().toISOString();
+const codeDate = () => {
+  let latest = 0;
+  for (const f of ['server.js', ...fs.readdirSync(path.join(root, 'lib')).map((x) => `lib/${x}`)]) {
+    try {
+      latest = Math.max(latest, fs.statSync(path.join(root, f)).mtimeMs);
+    } catch {
+      /* ignore */
+    }
+  }
+  return new Date(latest).toISOString();
+};
+const serverInfo = () => ({ startedAt: STARTED_AT, codeChangedAt: codeDate(), folder: root });
 
 const wrap = (fn) => (req, res, next) =>
   Promise.resolve()
@@ -294,10 +311,10 @@ app.get(
       const sid = cookies(req).bq_sid;
       const s = oauth.getSession(sid);
       const site = currentJiraConfig().cfg.siteUrl;
-      if (!s) return { mode: 'jira', auth: 'oauth', signedIn: false, site, source };
-      return { ...(await be(req).status()), auth: 'oauth', signedIn: true, source };
+      if (!s) return { mode: 'jira', auth: 'oauth', signedIn: false, site, source, server: serverInfo() };
+      return { ...(await be(req).status()), auth: 'oauth', signedIn: true, source, server: serverInfo() };
     }
-    return { ...(await be(req).status()), signedIn: true, source };
+    return { ...(await be(req).status()), signedIn: true, source, server: serverInfo() };
   }),
 );
 
@@ -341,7 +358,33 @@ app.get(
         (e) => ({ error: e.message }),
       ),
     ]);
-    return { project, teams: boards.list ? settings.boardTeams(key, boards.list) : [], boardsError: boards.error || null };
+    const list = boards.list || [];
+    const usable = list.filter((b) => !b.broken);
+    const hidden = new Set(settings.getHiddenBoards(key));
+    const shown = new Set(settings.getShownBoards(key));
+    // Hidden: hidden by you, or a board from elsewhere (other project, personal) you haven't chosen to show.
+    const isHidden = (b) => hidden.has(b.id) || (b.elsewhere && !shown.has(b.id));
+    return {
+      project,
+      teams: settings.boardTeams(key, usable.filter((b) => !isHidden(b))),
+      hiddenBoards: usable
+        .filter(isHidden)
+        .map(({ id, name, type, elsewhere }) => ({ id, name, type, reason: hidden.has(id) ? 'hidden by you' : elsewhere })),
+      // Boards Jira still lists but that can't be used (deleted, no filter…). Never shown as teams.
+      brokenBoards: list.filter((b) => b.broken).map(({ id, name, broken }) => ({ id, name, reason: broken })),
+      boardsError: boards.error || null,
+    };
+  }),
+);
+
+// Hide or show a board on the project page. Only saved in Bug Rally.
+app.put(
+  '/api/projects/:key/hidden-boards',
+  wrap((req) => {
+    be(req);
+    const boardId = String(req.body?.boardId || '').replace(/\D/g, '').slice(0, 20);
+    if (!boardId) throw bad('Which board?');
+    return { hiddenBoards: settings.setBoardHidden(projectKey(req.params.key), boardId, Boolean(req.body?.hidden)) };
   }),
 );
 
@@ -407,7 +450,10 @@ app.put(
   }),
 );
 
-app.get('/api/projects/:key/boards', wrap((req) => be(req).listBoards(projectKey(req.params.key))));
+app.get(
+  '/api/projects/:key/boards',
+  wrap(async (req) => (await be(req).listBoards(projectKey(req.params.key))).filter((b) => !b.broken)),
+);
 
 app.post(
   '/api/projects/:key/teams/:team/test-filter',
@@ -593,4 +639,5 @@ app.listen(PORT, HOST, () => {
     oauth: 'Jira, everyone signs in with their own Atlassian account',
   }[method];
   console.log(`Bug Rally running on ${PUBLIC_URL}  ·  ${where}`);
+  console.log(`Code folder: ${root}`);
 });
