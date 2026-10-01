@@ -632,6 +632,21 @@ function createProjectForm() {
   });
 }
 
+// "2 features · 5 tasks & stories · 1 bug" for an off-board count.
+function offBreakdown(r) {
+  const parts = [];
+  if (r.features) parts.push(`${r.features} feature${r.features === 1 ? '' : 's'}`);
+  if (r.tasks) parts.push(`${r.tasks} task${r.tasks === 1 ? '' : 's'} & stor${r.tasks === 1 ? 'y' : 'ies'}`);
+  if (r.bugs) parts.push(`${r.bugs} bug${r.bugs === 1 ? '' : 's'}`);
+  return parts.length ? `<small class="muted">${parts.join(' · ')}</small>` : '';
+}
+const offCountHtml = (r) =>
+  r.count == null
+    ? '<span class="muted">Couldn’t count</span>'
+    : r.count === 0
+      ? '<span class="ok-text">✓ Nothing off-board</span>'
+      : `<span><b class="off-n">${r.count}</b> unfinished</span>${offBreakdown(r)}`;
+
 // Off-board count for one board: its people's tickets that aren't on it. Fills [data-off="board"].
 async function loadBoardOff(pkey, boardId) {
   const el = () => document.querySelector('.off-count[data-off="board"]');
@@ -645,9 +660,7 @@ async function loadBoardOff(pkey, boardId) {
       ? `<small class="muted off-people" title="${esc(r.people.join(', '))}">${r.people.length} ${r.people.length === 1 ? 'person' : 'people'}: ${esc(r.people.slice(0, 3).join(', '))}${r.people.length > 3 ? ` +${r.people.length - 3}` : ''}</small>`
       : '<small class="muted off-people">No one is assigned to its not-started tickets yet</small>';
     const n = r.count;
-    target.innerHTML = `${
-      !r.people.length ? '' : n == null ? '<span class="muted">Couldn’t count</span>' : n === 0 ? '<span class="ok-text">✓ Nothing off-board</span>' : `<span><b class="off-n">${n}</b> unfinished</span>`
-    }${ppl}`;
+    target.innerHTML = `${r.people.length ? offCountHtml(r) : ''}${ppl}`;
     target.closest('.off-card')?.classList.toggle('clean', !r.people.length || n === 0);
   } catch (e) {
     const target = el();
@@ -804,11 +817,9 @@ async function renderProject(pkey) {
       el.innerHTML = html;
       el.closest('.off-card')?.classList.toggle('clean', clean);
     };
-    const countHtml = (n) =>
-      n == null ? '<span class="muted">Couldn’t count</span>' : n === 0 ? '<span class="ok-text">✓ Nothing off-board</span>' : `<span><b class="off-n">${n}</b> unfinished</span>`;
     api(`/projects/${enc(pkey)}/offboard`)
       .then((r) => {
-        fill('_project', countHtml(r.count), r.count === 0);
+        fill('_project', offCountHtml(r), r.count === 0);
         if (r.ignored?.length) {
           const note = $('.off-card .off-note');
           if (note)

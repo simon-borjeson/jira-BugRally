@@ -57,7 +57,7 @@ Finds unfinished work that boards miss, often tickets with a missing or wrong la
 - **On each board's page (Stages, and a 👥 button on the Kanban):** *Our people's other tickets* lists tickets in the project assigned to this board's people that this board doesn't show. A board's people are worked out automatically: the assignees of its not-started tickets (Jira status category *To Do*).
 - **On the project page:** *Not on any board* lists everything in the project that none of the shown boards include. Boards whose filter is just the whole project (`project = KEY`) don't count here, since nothing would ever be outside them; the tile says which ones were left out.
 
-Each one shows a count and opens like a team page, with Stages and Kanban, so you can move tickets into features or fix them in the details panel. Counts are kept for 5 minutes, and refreshed right away when you hide or show a board.
+Off-board pages only show unfinished work (no finished stages, items or Done columns). Each one shows a count of unfinished features, tasks, stories and bugs (with the breakdown) that matches exactly what the page shows, and opens like a team page, with Stages and Kanban, so you can move tickets into features or fix them in the details panel. Counts are kept for 5 minutes, and refreshed right away when you hide or show a board.
 
 ### Team pages
 

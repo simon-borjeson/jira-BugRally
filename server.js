@@ -406,20 +406,36 @@ async function boardOffInfo(req, backend, key, boardId) {
 const clearOffboard = (key) => {
   for (const k of offboardCache.keys()) if (k.split('|')[1] === key) offboardCache.delete(k);
 };
-// Counts are of tasks, stories and bugs, like the lists on the page; features (epics) are stages, not items.
-const OPEN_ITEMS = ' AND statusCategory != Done AND issuetype in standardIssueTypes() AND issuetype != Epic';
 
 // For the automatic off-board pages: the team with its filter filled in.
 async function resolveTeam(req, backend, key, team) {
   if (!team.special) return team;
   if (team.special === 'offboard') {
     const info = await offboardInfo(req, backend, key);
-    return { ...team, filter: { mode: 'jql', jql: info.projectJql, applyToItems: true }, boardCount: info.boardCount, ignored: info.ignored };
+    return {
+      ...team,
+      openOnly: true,
+      filter: { mode: 'jql', jql: info.projectJql, applyToItems: true },
+      boardCount: info.boardCount,
+      ignored: info.ignored,
+    };
   }
   const info = await boardOffInfo(req, backend, key, team.peopleOf);
   // No people → match nothing.
   const jql = info.jql || `project = "${key}" AND created < "1971-01-01"`;
-  return { ...team, people: info.people, filter: { mode: 'jql', jql, applyToItems: true } };
+  return { ...team, openOnly: true, people: info.people, filter: { mode: 'jql', jql, applyToItems: true } };
+}
+
+// What an off-board page shows, counted from the same data the page loads: unfinished features (that match
+// themselves, not ones only shown because they hold a matching ticket), tasks, stories and bugs.
+async function offCounts(req, backend, key, team) {
+  return cached(cacheKey(req, key, 'count', team.id), async () => {
+    const b = await backend.board(key, team, { maxFeatures: 2000, openOnly: true });
+    const items = [...b.features.flatMap((f) => f.items), ...b.unsorted].filter((i) => !i.done);
+    const features = b.features.filter((f) => !f.viaItems && !f.done).length;
+    const bugs = items.filter((i) => i.type === 'bug').length;
+    return { count: features + items.length, features, tasks: items.length - bugs, bugs };
+  });
 }
 // What the browser gets: the team without the (long) generated JQL.
 const publicTeam = (t) => (t.special ? { ...t, filter: { mode: 'auto' } } : t);
@@ -464,9 +480,9 @@ app.get(
     const key = projectKey(req.params.key);
     const backend = be(req);
     if (req.query.refresh) clearOffboard(key);
-    const info = await offboardInfo(req, backend, key);
-    const count = await backend.countIssues(`${info.projectJql}${OPEN_ITEMS}`).catch(() => null);
-    return { count, boards: info.boardCount, ignored: info.ignored };
+    const team = await resolveTeam(req, backend, key, teamOf(key, '_offboard'));
+    const counts = await offCounts(req, backend, key, team).catch(() => ({ count: null }));
+    return { ...counts, boards: team.boardCount, ignored: team.ignored };
   }),
 );
 app.get(
@@ -475,9 +491,9 @@ app.get(
     const key = projectKey(req.params.key);
     const boardId = String(req.params.board).replace(/\D/g, '');
     const backend = be(req);
-    const info = await boardOffInfo(req, backend, key, boardId);
-    const count = info.jql ? await backend.countIssues(`${info.jql}${OPEN_ITEMS}`).catch(() => null) : 0;
-    return { count, people: info.people.map((p) => p.name) };
+    const team = await resolveTeam(req, backend, key, teamOf(key, `o${boardId}`));
+    const counts = team.people.length ? await offCounts(req, backend, key, team).catch(() => ({ count: null })) : { count: 0 };
+    return { ...counts, people: team.people.map((p) => p.name) };
   }),
 );
 
@@ -530,7 +546,7 @@ app.get(
     // ?features=400 loads more features (200 at a time).
     const maxFeatures = Math.min(10000, Math.max(200, Math.ceil((Number(req.query.features) || 200) / 200) * 200));
     const [board, bugTypeName] = await Promise.all([
-      backend.board(key, team, { maxFeatures }),
+      backend.board(key, team, { maxFeatures, openOnly: Boolean(team.openOnly) }),
       backend.bugTypeName(key, team.defaults.bugType),
     ]);
     return { ...board, team: publicTeam(team), bugTypeName };
